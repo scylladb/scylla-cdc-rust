@@ -1,3 +1,5 @@
+pub mod stream_generations;
+
 #[cfg(test)]
 mod tests {
     #[test]

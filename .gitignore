@@ -2,3 +2,4 @@
 /scylla-cdc/target
 /target
 Cargo.lock
+.idea/
