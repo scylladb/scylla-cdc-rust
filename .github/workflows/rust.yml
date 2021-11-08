@@ -1,0 +1,33 @@
+name: Rust
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      scylladb1:
+        image: scylladb/scylla
+        ports:
+          - 9042:9042
+        options: --health-cmd "cqlsh --debug" --health-interval 5s --health-retries 10
+        volumes:
+          - ${{ github.workspace }}:/workspace
+    steps:
+      - uses: actions/checkout@v2
+      - name: Format check
+        run: cargo fmt --verbose --all -- --check
+      - name: Clippy check
+        run: cargo clippy --verbose -- -D warnings
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        # test threads must be one because else database tests will run in parallel and will result in flaky tests
+        run: cargo test --verbose -- --test-threads=1
