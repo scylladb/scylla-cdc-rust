@@ -1,6 +1,6 @@
 use futures::stream::StreamExt;
 use scylla::batch::Consistency;
-use scylla::cql_to_rust::{FromCqlVal, FromCqlValError, FromCqlValError::BadCqlType, FromRow};
+use scylla::cql_to_rust::{FromCqlVal, FromCqlValError, FromCqlValError::BadCqlType};
 use scylla::frame::response::result::{CqlValue, Row};
 use scylla::frame::value::{Timestamp, Value, ValueTooBig};
 use scylla::query::Query;
