@@ -1,18 +1,41 @@
 use futures::stream::StreamExt;
 use scylla::batch::Consistency;
-use scylla::frame::response::result::Row;
-use scylla::frame::value::Timestamp;
+use scylla::cql_to_rust::{FromCqlVal, FromCqlValError, FromCqlValError::BadCqlType, FromRow};
+use scylla::frame::response::result::{CqlValue, Row};
+use scylla::frame::value::{Timestamp, Value, ValueTooBig};
 use scylla::query::Query;
-use scylla::{IntoTypedRows, Session};
+use scylla::{FromRow, IntoTypedRows, Session};
 use std::error::Error;
 use std::sync::Arc;
-use uuid::Uuid;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct Generation(chrono::Duration);
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
+pub struct GenerationTimestamp {
+    timestamp: chrono::Duration,
+}
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct StreamID(Vec<u8>);
+impl Value for GenerationTimestamp {
+    fn serialize(&self, buf: &mut Vec<u8>) -> Result<(), ValueTooBig> {
+        Timestamp(self.timestamp).serialize(buf)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
+pub struct StreamID {
+    id: Vec<u8>,
+}
+
+impl Value for StreamID {
+    fn serialize(&self, buf: &mut Vec<u8>) -> Result<(), ValueTooBig> {
+        self.id.serialize(buf)
+    }
+}
+
+impl FromCqlVal<CqlValue> for StreamID {
+    fn from_cql(cql_val: CqlValue) -> Result<Self, FromCqlValError> {
+        let id = cql_val.as_blob().ok_or(BadCqlType)?.to_owned();
+        Ok(StreamID { id })
+    }
+}
 
 /// Component responsible for managing stream generations.
 pub struct GenerationFetcher {
@@ -25,7 +48,6 @@ pub struct GenerationFetcher {
 const DEFAULT_PAGE_SIZE: i32 = 5000;
 
 impl GenerationFetcher {
-    /// Creates new instance of GenerationFetcher.
     pub fn new(session: &Arc<Session>) -> GenerationFetcher {
         GenerationFetcher {
             generations_table_name: "system_distributed.cdc_generation_timestamps".to_string(),
@@ -37,33 +59,33 @@ impl GenerationFetcher {
     // Function instead of constant for testing purposes.
     fn get_all_stream_generations_query(&self) -> String {
         format!(
-            r#"
+            "
     SELECT time
     FROM {}
     WHERE key = 'timestamps';
-    "#,
+    ",
             self.generations_table_name
         )
     }
 
     /// In case of a success returns a vector containing all the generations in the database.
     /// Propagates all errors.
-    pub async fn fetch_all_generations(&self) -> Result<Vec<Generation>, Box<dyn Error>> {
-        let mut query = Query::new(self.get_all_stream_generations_query());
-        select_consistency(&self.session, &mut query).await?;
+    pub async fn fetch_all_generations(&self) -> Result<Vec<GenerationTimestamp>, Box<dyn Error>> {
+        let mut generations = Vec::new();
+
+        let mut query =
+            new_distributed_system_query(self.get_all_stream_generations_query(), &self.session)
+                .await?;
         query.set_page_size(DEFAULT_PAGE_SIZE);
 
         let mut rows = self
             .session
             .query_iter(query, &[])
             .await?
-            .into_typed::<(chrono::Duration,)>();
+            .into_typed::<GenerationTimestamp>();
 
-        let mut generations = vec![];
-
-        while let Some(next_row) = rows.next().await {
-            let (generation,) = next_row?;
-            generations.push(Generation(generation));
+        while let Some(generation) = rows.next().await {
+            generations.push(generation?)
         }
 
         Ok(generations)
@@ -72,14 +94,14 @@ impl GenerationFetcher {
     // Function instead of constant for testing purposes.
     fn get_generation_by_timestamp_query(&self) -> String {
         format!(
-            r#"
+            "
     SELECT time
     FROM {}
     WHERE key = 'timestamps'
     AND time <= ?
     ORDER BY time DESC
     LIMIT 1;
-    "#,
+    ",
             self.generations_table_name
         )
     }
@@ -90,43 +112,27 @@ impl GenerationFetcher {
     pub async fn fetch_generation_by_timestamp(
         &self,
         time: &chrono::Duration,
-    ) -> Result<Option<Generation>, Box<dyn Error>> {
-        let mut query = Query::new(self.get_generation_by_timestamp_query());
-        select_consistency(&self.session, &mut query).await?;
+    ) -> Result<Option<GenerationTimestamp>, Box<dyn Error>> {
+        let query =
+            new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
+                .await?;
 
         let result = self.session.query(query, (Timestamp(*time),)).await?.rows;
 
         GenerationFetcher::return_single_row(result)
     }
 
-    /// Given a timeuuid of a ti of an operation fetch generation that was operating when this operation was performed.
-    /// If no such generation exists, returns None.
-    /// Propagates errors.
-    pub async fn fetch_generation_by_timeuuid(
-        &self,
-        time: &Uuid,
-    ) -> Result<Option<Generation>, Box<dyn Error>> {
-        let (secs, nanos) = time
-            .to_timestamp()
-            .ok_or("Uuid is not a timeuuid")?
-            .to_unix();
-        let timestamp =
-            chrono::Duration::seconds(secs as i64) + chrono::Duration::nanoseconds(nanos as i64);
-
-        self.fetch_generation_by_timestamp(&timestamp).await
-    }
-
     // Function instead of constant for testing purposes.
     fn get_next_generation_query(&self) -> String {
         format!(
-            r#"
+            "
     SELECT time
     FROM {}
     WHERE key = 'timestamps'
     AND time > ?
     ORDER BY time ASC
     LIMIT 1;
-    "#,
+    ",
             self.generations_table_name
         )
     }
@@ -136,16 +142,12 @@ impl GenerationFetcher {
     /// Propagates errors.
     pub async fn fetch_next_generation(
         &self,
-        generation: &Generation,
-    ) -> Result<Option<Generation>, Box<dyn Error>> {
-        let mut query = Query::new(self.get_next_generation_query());
-        select_consistency(&self.session, &mut query).await?;
+        generation: &GenerationTimestamp,
+    ) -> Result<Option<GenerationTimestamp>, Box<dyn Error>> {
+        let query =
+            new_distributed_system_query(self.get_next_generation_query(), &self.session).await?;
 
-        let result = self
-            .session
-            .query(query, (Timestamp(generation.0),))
-            .await?
-            .rows;
+        let result = self.session.query(query, (generation,)).await?.rows;
 
         GenerationFetcher::return_single_row(result)
     }
@@ -153,11 +155,11 @@ impl GenerationFetcher {
     // Function instead of constant for testing purposes.
     fn get_stream_ids_by_time_query(&self) -> String {
         format!(
-            r#"
+            "
     SELECT streams
     FROM {}
     WHERE time = ?;
-    "#,
+    ",
             self.streams_table_name
         )
     }
@@ -165,35 +167,37 @@ impl GenerationFetcher {
     /// Given a generation return identifiers of all streams of this generation.
     pub async fn fetch_stream_ids(
         &self,
-        generation: &Generation,
+        generation: &GenerationTimestamp,
     ) -> Result<Vec<StreamID>, Box<dyn Error>> {
-        let mut result_vec = vec![];
+        let mut result_vec = Vec::new();
 
-        let mut query = Query::new(self.get_stream_ids_by_time_query());
-        select_consistency(&self.session, &mut query).await?;
+        let mut query =
+            new_distributed_system_query(self.get_stream_ids_by_time_query(), &self.session)
+                .await?;
         query.set_page_size(DEFAULT_PAGE_SIZE);
 
         let mut rows = self
             .session
-            .query_iter(query, (Timestamp(generation.0),))
+            .query_iter(query, (generation,))
             .await?
-            .into_typed::<(Vec<Vec<u8>>,)>();
+            .into_typed::<(Vec<StreamID>,)>();
 
         while let Some(next_row) = rows.next().await {
             let (ids,) = next_row?;
             for id in ids {
-                result_vec.push(StreamID(id));
+                result_vec.push(id);
             }
         }
         Ok(result_vec)
     }
 
     // Return single row containing generation.
-    fn return_single_row(row: Option<Vec<Row>>) -> Result<Option<Generation>, Box<dyn Error>> {
+    fn return_single_row(
+        row: Option<Vec<Row>>,
+    ) -> Result<Option<GenerationTimestamp>, Box<dyn Error>> {
         if let Some(row) = row {
-            if let Some(row) = row.into_typed::<(chrono::Duration,)>().next() {
-                let time = row?.0;
-                return Ok(Some(Generation(time)));
+            if let Some(generation) = row.into_typed::<GenerationTimestamp>().next() {
+                return Ok(Some(generation?));
             }
         }
 
@@ -226,13 +230,21 @@ async fn select_consistency(session: &Session, query: &mut Query) -> Result<(), 
     Ok(())
 }
 
+async fn new_distributed_system_query(
+    stmt: String,
+    session: &Session,
+) -> Result<Query, Box<dyn Error>> {
+    let mut query = Query::new(stmt);
+    select_consistency(session, &mut query).await?;
+
+    Ok(query)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use scylla::statement::Consistency;
     use scylla::SessionBuilder;
-    use uuid::v1::{Context, Timestamp};
-    use uuid::Uuid;
 
     const TEST_STREAM_TABLE: &str = "Test.cdc_streams_descriptions_v2";
     const TEST_GENERATION_TABLE: &str = "Test.cdc_generation_timestamps";
@@ -256,26 +268,13 @@ mod tests {
     // Constructs mock table with the same schema as the original one's.
     fn construct_generation_table_query() -> String {
         format!(
-            "CREATE TABLE IF NOT EXISTS {}(
+            "
+    CREATE TABLE IF NOT EXISTS {}(
     key text,
     time timestamp,
     expired timestamp,
     PRIMARY KEY (key, time)
-) WITH CLUSTERING ORDER BY (time DESC)
-    AND bloom_filter_fp_chance = 0.01
-    AND caching = {{'keys': 'ALL', 'rows_per_partition': 'ALL'}}
-    AND comment = ''
-    AND compaction = {{'class': 'SizeTieredCompactionStrategy'}}
-    AND compression = {{'sstable_compression': 'org.apache.cassandra.io.compress.LZ4Compressor'}}
-    AND crc_check_chance = 1.0
-    AND dclocal_read_repair_chance = 0.0
-    AND default_time_to_live = 0
-    AND gc_grace_seconds = 864000
-    AND max_index_interval = 2048
-    AND memtable_flush_period_in_ms = 0
-    AND min_index_interval = 128
-    AND read_repair_chance = 0.0
-    AND speculative_retry = '99.0PERCENTILE';",
+) WITH CLUSTERING ORDER BY (time DESC);",
             TEST_GENERATION_TABLE
         )
     }
@@ -283,26 +282,13 @@ mod tests {
     // Constructs mock table with the same schema as the original one's.
     fn construct_stream_table_query() -> String {
         format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            "
+    CREATE TABLE IF NOT EXISTS {} (
     time timestamp,
     range_end bigint,
     streams frozen<set<blob>>,
     PRIMARY KEY (time, range_end)
-) WITH CLUSTERING ORDER BY (range_end ASC)
-    AND bloom_filter_fp_chance = 0.01
-    AND caching = {{'keys': 'ALL', 'rows_per_partition': 'ALL'}}
-    AND comment = ''
-    AND compaction = {{'class': 'SizeTieredCompactionStrategy'}}
-    AND compression = {{'sstable_compression': 'org.apache.cassandra.io.compress.LZ4Compressor'}}
-    AND crc_check_chance = 1.0
-    AND dclocal_read_repair_chance = 0.0
-    AND default_time_to_live = 0
-    AND gc_grace_seconds = 864000
-    AND max_index_interval = 2048
-    AND memtable_flush_period_in_ms = 0
-    AND min_index_interval = 128
-    AND read_repair_chance = 0.0
-    AND speculative_retry = '99.0PERCENTILE';",
+) WITH CLUSTERING ORDER BY (range_end ASC);",
             TEST_STREAM_TABLE
         )
     }
@@ -318,6 +304,7 @@ mod tests {
         query.set_consistency(Consistency::All);
 
         session.query(query, &[]).await.unwrap();
+        session.await_schema_agreement().await.unwrap();
 
         // Create test tables containing information about generations and streams.
         for query in vec![
@@ -326,6 +313,7 @@ mod tests {
         ] {
             session.query(query, &[]).await.unwrap();
         }
+        session.await_schema_agreement().await.unwrap();
 
         // Delete all leftovers from previous tests.
         for table in vec![
@@ -345,11 +333,15 @@ mod tests {
             Timestamp(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS));
 
         for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
-            let mut query = Query::new(format!(
-                "INSERT INTO {} (key, time, expired) VALUES ('timestamps', ?, NULL);",
-                TEST_GENERATION_TABLE
-            ));
-            select_consistency(session, &mut query).await.unwrap();
+            let query = new_distributed_system_query(
+                format!(
+                    "INSERT INTO {} (key, time, expired) VALUES ('timestamps', ?, NULL);",
+                    TEST_GENERATION_TABLE
+                ),
+                session,
+            )
+            .await
+            .unwrap();
 
             session
                 .query(
@@ -360,11 +352,16 @@ mod tests {
                 .unwrap();
         }
 
-        let mut query = Query::new(format!(
-            "INSERT INTO {}(time, range_end, streams) VALUES (?, -1, {{{}, {}}});",
-            TEST_STREAM_TABLE, TEST_STREAM_1, TEST_STREAM_2
-        ));
-        select_consistency(session, &mut query).await.unwrap();
+        let query = new_distributed_system_query(
+            format!(
+                "INSERT INTO {}(time, range_end, streams) VALUES (?, -1, {{{}, {}}});",
+                TEST_STREAM_TABLE, TEST_STREAM_1, TEST_STREAM_2
+            ),
+            session,
+        )
+        .await
+        .unwrap();
+
         session.query(query, (stream_generation,)).await.unwrap();
     }
 
@@ -387,65 +384,17 @@ mod tests {
         let fetcher = setup().await.unwrap();
 
         let correct_gen = vec![
-            Generation(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS)),
-            Generation(chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS)),
+            GenerationTimestamp {
+                timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+            },
+            GenerationTimestamp {
+                timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+            },
         ];
 
         let gen = fetcher.fetch_all_generations().await.unwrap();
 
         assert_eq!(gen, correct_gen);
-    }
-
-    fn construct_timeuuid(milliseconds: i64) -> Uuid {
-        const CONTEXT_COUNT: u16 = 2137; // Just a random number.
-        let context = Context::new(CONTEXT_COUNT);
-
-        let time = std::time::Duration::from_millis(milliseconds as u64);
-        let timestamp = Timestamp::from_unix(context, time.as_secs(), time.subsec_nanos());
-
-        let u = Uuid::new_v1(timestamp, &[1, 2, 3, 4, 5, 6])
-            .expect("Couldn't create a valid uuid value.");
-        println!("{}", u);
-        u
-    }
-
-    #[tokio::test]
-    async fn test_get_generation_by_timeuuid() {
-        let fetcher = setup().await.unwrap();
-
-        // Input.
-        let timestamp_ms_vec = vec![
-            GENERATION_OLD_MILLISECONDS - 1,
-            GENERATION_OLD_MILLISECONDS,
-            (GENERATION_NEW_MILLISECONDS + GENERATION_OLD_MILLISECONDS) / 2,
-            GENERATION_NEW_MILLISECONDS,
-            GENERATION_NEW_MILLISECONDS + 1,
-        ];
-        // Expected output.
-        let correct_generation_vec = vec![
-            None,
-            Some(GENERATION_OLD_MILLISECONDS),
-            Some(GENERATION_OLD_MILLISECONDS),
-            Some(GENERATION_NEW_MILLISECONDS),
-            Some(GENERATION_NEW_MILLISECONDS),
-        ];
-
-        assert_eq!(timestamp_ms_vec.len(), correct_generation_vec.len());
-
-        for i in 0..timestamp_ms_vec.len() {
-            let gen = fetcher
-                .fetch_generation_by_timeuuid(&construct_timeuuid(timestamp_ms_vec[i]))
-                .await
-                .unwrap();
-
-            match correct_generation_vec[i] {
-                Some(correct_gen) => assert_eq!(
-                    gen.unwrap(),
-                    Generation(chrono::Duration::milliseconds(correct_gen))
-                ),
-                None => assert_eq!(gen, None),
-            }
-        }
     }
 
     #[tokio::test]
@@ -485,8 +434,9 @@ mod tests {
 
             assert_eq!(
                 gen,
-                correct_generation_vec[i]
-                    .map(|gen_ms| Generation(chrono::Duration::milliseconds(gen_ms))),
+                correct_generation_vec[i].map(|gen_ms| GenerationTimestamp {
+                    timestamp: chrono::Duration::milliseconds(gen_ms)
+                }),
             );
         }
     }
@@ -503,7 +453,9 @@ mod tests {
         let gen_old_next = fetcher.fetch_next_generation(&gen[1]).await.unwrap();
         assert_eq!(
             gen_old_next.unwrap(),
-            Generation(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS))
+            GenerationTimestamp {
+                timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS)
+            }
         );
     }
 
@@ -511,10 +463,12 @@ mod tests {
     async fn test_get_next_generation_correct_order() {
         let fetcher = setup().await.unwrap();
 
-        let gen_before_all_others = Generation(chrono::Duration::milliseconds(
-            GENERATION_OLD_MILLISECONDS - 1,
-        ));
-        let first_gen = Generation(chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS));
+        let gen_before_all_others = GenerationTimestamp {
+            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
+        };
+        let first_gen = GenerationTimestamp {
+            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+        };
         let gen_before_others_next = fetcher
             .fetch_next_generation(&gen_before_all_others)
             .await
@@ -526,13 +480,17 @@ mod tests {
     async fn test_do_get_stream_ids() {
         let fetcher = setup().await.unwrap();
 
-        let gen = Generation(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS));
+        let gen = GenerationTimestamp {
+            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+        };
 
         let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
 
         let correct_stream_ids: Vec<StreamID> = vec![TEST_STREAM_1, TEST_STREAM_2]
             .iter()
-            .map(|stream| StreamID(hex::decode(stream.strip_prefix("0x").unwrap()).unwrap()))
+            .map(|stream| StreamID {
+                id: hex::decode(stream.strip_prefix("0x").unwrap()).unwrap(),
+            })
             .collect();
 
         assert_eq!(stream_ids, correct_stream_ids);
