@@ -1,6 +1,6 @@
 use futures::stream::StreamExt;
 use scylla::batch::Consistency;
-use scylla::cql_to_rust::{FromCqlVal, FromCqlValError, FromCqlValError::BadCqlType};
+use scylla::cql_to_rust::{FromCqlVal, FromCqlValError};
 use scylla::frame::response::result::{CqlValue, Row};
 use scylla::frame::value::{Timestamp, Value, ValueTooBig};
 use scylla::query::Query;
@@ -32,7 +32,10 @@ impl Value for StreamID {
 
 impl FromCqlVal<CqlValue> for StreamID {
     fn from_cql(cql_val: CqlValue) -> Result<Self, FromCqlValError> {
-        let id = cql_val.as_blob().ok_or(BadCqlType)?.to_owned();
+        let id = cql_val
+            .as_blob()
+            .ok_or(FromCqlValError::BadCqlType)?
+            .to_owned();
         Ok(StreamID { id })
     }
 }
@@ -165,10 +168,11 @@ impl GenerationFetcher {
     }
 
     /// Given a generation return identifiers of all streams of this generation.
+    /// Streams are grouped by vnodes.
     pub async fn fetch_stream_ids(
         &self,
         generation: &GenerationTimestamp,
-    ) -> Result<Vec<StreamID>, Box<dyn Error>> {
+    ) -> Result<Vec<Vec<StreamID>>, Box<dyn Error>> {
         let mut result_vec = Vec::new();
 
         let mut query =
@@ -184,10 +188,9 @@ impl GenerationFetcher {
 
         while let Some(next_row) = rows.next().await {
             let (ids,) = next_row?;
-            for id in ids {
-                result_vec.push(id);
-            }
+            result_vec.push(ids);
         }
+
         Ok(result_vec)
     }
 
@@ -486,10 +489,15 @@ mod tests {
 
         let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
 
-        let correct_stream_ids: Vec<StreamID> = vec![TEST_STREAM_1, TEST_STREAM_2]
+        let correct_stream_ids: Vec<Vec<StreamID>> = vec![[TEST_STREAM_1, TEST_STREAM_2]]
             .iter()
-            .map(|stream| StreamID {
-                id: hex::decode(stream.strip_prefix("0x").unwrap()).unwrap(),
+            .map(|stream_vec| {
+                stream_vec
+                    .iter()
+                    .map(|stream| StreamID {
+                        id: hex::decode(stream.strip_prefix("0x").unwrap()).unwrap(),
+                    })
+                    .collect()
             })
             .collect();
 
