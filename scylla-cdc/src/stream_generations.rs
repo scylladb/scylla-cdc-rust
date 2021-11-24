@@ -1,3 +1,4 @@
+use anyhow;
 use futures::stream::StreamExt;
 use scylla::batch::Consistency;
 use scylla::cql_to_rust::{FromCqlVal, FromCqlValError};
@@ -5,7 +6,6 @@ use scylla::frame::response::result::{CqlValue, Row};
 use scylla::frame::value::{Timestamp, Value, ValueTooBig};
 use scylla::query::Query;
 use scylla::{FromRow, IntoTypedRows, Session};
-use std::error::Error;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
@@ -73,7 +73,7 @@ impl GenerationFetcher {
 
     /// In case of a success returns a vector containing all the generations in the database.
     /// Propagates all errors.
-    pub async fn fetch_all_generations(&self) -> Result<Vec<GenerationTimestamp>, Box<dyn Error>> {
+    pub async fn fetch_all_generations(&self) -> anyhow::Result<Vec<GenerationTimestamp>> {
         let mut generations = Vec::new();
 
         let mut query =
@@ -115,7 +115,7 @@ impl GenerationFetcher {
     pub async fn fetch_generation_by_timestamp(
         &self,
         time: &chrono::Duration,
-    ) -> Result<Option<GenerationTimestamp>, Box<dyn Error>> {
+    ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query =
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
                 .await?;
@@ -146,7 +146,7 @@ impl GenerationFetcher {
     pub async fn fetch_next_generation(
         &self,
         generation: &GenerationTimestamp,
-    ) -> Result<Option<GenerationTimestamp>, Box<dyn Error>> {
+    ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query =
             new_distributed_system_query(self.get_next_generation_query(), &self.session).await?;
 
@@ -172,7 +172,7 @@ impl GenerationFetcher {
     pub async fn fetch_stream_ids(
         &self,
         generation: &GenerationTimestamp,
-    ) -> Result<Vec<Vec<StreamID>>, Box<dyn Error>> {
+    ) -> anyhow::Result<Vec<Vec<StreamID>>> {
         let mut result_vec = Vec::new();
 
         let mut query =
@@ -195,9 +195,7 @@ impl GenerationFetcher {
     }
 
     // Return single row containing generation.
-    fn return_single_row(
-        row: Option<Vec<Row>>,
-    ) -> Result<Option<GenerationTimestamp>, Box<dyn Error>> {
+    fn return_single_row(row: Option<Vec<Row>>) -> anyhow::Result<Option<GenerationTimestamp>> {
         if let Some(row) = row {
             if let Some(generation) = row.into_typed::<GenerationTimestamp>().next() {
                 return Ok(Some(generation?));
@@ -209,7 +207,7 @@ impl GenerationFetcher {
 }
 
 // Returns current cluster size in case of a success.
-async fn get_cluster_size(session: &Session) -> Result<usize, Box<dyn Error>> {
+async fn get_cluster_size(session: &Session) -> anyhow::Result<usize> {
     // We are using default consistency here since the system keyspace is special and
     // the coordinator which handles the query will only read local data
     // and will not contact other nodes, so the query will work with any cluster size larger than 0.
@@ -225,7 +223,7 @@ async fn get_cluster_size(session: &Session) -> Result<usize, Box<dyn Error>> {
 }
 
 // Choose appropriate consistency level depending on the cluster size.
-async fn select_consistency(session: &Session, query: &mut Query) -> Result<(), Box<dyn Error>> {
+async fn select_consistency(session: &Session, query: &mut Query) -> anyhow::Result<()> {
     query.set_consistency(match get_cluster_size(session).await? {
         1 => Consistency::One,
         _ => Consistency::Quorum,
@@ -233,10 +231,7 @@ async fn select_consistency(session: &Session, query: &mut Query) -> Result<(), 
     Ok(())
 }
 
-async fn new_distributed_system_query(
-    stmt: String,
-    session: &Session,
-) -> Result<Query, Box<dyn Error>> {
+async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow::Result<Query> {
     let mut query = Query::new(stmt);
     select_consistency(session, &mut query).await?;
 
@@ -369,7 +364,7 @@ mod tests {
     }
 
     // Create setup for tests.
-    async fn setup() -> Result<GenerationFetcher, Box<dyn Error>> {
+    async fn setup() -> anyhow::Result<GenerationFetcher> {
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
 
         let session = SessionBuilder::new().known_node(uri).build().await?;
