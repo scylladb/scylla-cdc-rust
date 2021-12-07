@@ -353,7 +353,7 @@ mod tests {
         let cdc_row = CDCRow::from_row(row, &schema);
 
         // Test against the default values in CDCRow::from_row
-        assert!(cdc_row.stream_id.len() > 0);
+        assert!(!cdc_row.stream_id.is_empty());
         assert_ne!(cdc_row.time, uuid::Uuid::default());
         assert_eq!(cdc_row.batch_seq_no, 0);
         assert!(cdc_row.end_of_batch);

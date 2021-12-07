@@ -1,44 +1,12 @@
-use anyhow;
 use futures::stream::StreamExt;
 use scylla::batch::Consistency;
-use scylla::cql_to_rust::{FromCqlVal, FromCqlValError};
-use scylla::frame::response::result::{CqlValue, Row};
-use scylla::frame::value::{Timestamp, Value, ValueTooBig};
+use scylla::frame::response::result::Row;
+use scylla::frame::value::Timestamp;
 use scylla::query::Query;
-use scylla::{FromRow, IntoTypedRows, Session};
+use scylla::{IntoTypedRows, Session};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
-pub struct GenerationTimestamp {
-    timestamp: chrono::Duration,
-}
-
-impl Value for GenerationTimestamp {
-    fn serialize(&self, buf: &mut Vec<u8>) -> Result<(), ValueTooBig> {
-        Timestamp(self.timestamp).serialize(buf)
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
-pub struct StreamID {
-    id: Vec<u8>,
-}
-
-impl Value for StreamID {
-    fn serialize(&self, buf: &mut Vec<u8>) -> Result<(), ValueTooBig> {
-        self.id.serialize(buf)
-    }
-}
-
-impl FromCqlVal<CqlValue> for StreamID {
-    fn from_cql(cql_val: CqlValue) -> Result<Self, FromCqlValError> {
-        let id = cql_val
-            .as_blob()
-            .ok_or(FromCqlValError::BadCqlType)?
-            .to_owned();
-        Ok(StreamID { id })
-    }
-}
+use crate::cdc_types::{GenerationTimestamp, StreamID};
 
 /// Component responsible for managing stream generations.
 pub struct GenerationFetcher {
@@ -240,9 +208,10 @@ async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use scylla::statement::Consistency;
     use scylla::SessionBuilder;
+
+    use super::*;
 
     const TEST_STREAM_TABLE: &str = "Test.cdc_streams_descriptions_v2";
     const TEST_GENERATION_TABLE: &str = "Test.cdc_generation_timestamps";
