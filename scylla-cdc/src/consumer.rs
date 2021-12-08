@@ -1,9 +1,11 @@
+use async_trait::async_trait;
 use num_enum::TryFromPrimitive;
 use scylla::frame::response::result::{ColumnSpec, CqlValue, Row};
 use std::collections::HashMap;
 
+#[async_trait]
 pub trait Consumer {
-    fn consume_cdc(&mut self, data: CDCRow);
+    async fn consume_cdc(&mut self, data: CDCRow);
 }
 
 pub trait ConsumerFactory {
