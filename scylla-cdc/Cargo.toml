@@ -13,6 +13,7 @@ chrono = "0.4.19"
 futures = "0.3.17"
 uuid = "0.8.2"
 num_enum = "0.5.4"
+async-trait = "0.1.51"
 
 [dev-dependencies]
 hex = "0.4.3"
