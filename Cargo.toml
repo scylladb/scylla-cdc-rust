@@ -1,5 +1,5 @@
 [workspace]
 members = [
     "scylla-cdc",
-    "scylla-cdc-printer",
+    "scylla-cdc-replicator",
 ]

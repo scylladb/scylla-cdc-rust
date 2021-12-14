@@ -6,6 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-scylla = "0.2.1"
+# Temporary, until the necessary changes get released.
+scylla = { git = "https://github.com/scylladb/scylla-rust-driver" }
 scylla-cdc = { version = "0.1.0", path = "../scylla-cdc" }
 tokio = { version = "1.1.0", features = ["full"] }
+async-trait = "0.1.51"
+anyhow = "1.0.48"
+itertools = "0.10.3"
+uuid = {version = "0.8.2", features = ["v1"]}
