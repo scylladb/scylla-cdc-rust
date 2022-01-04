@@ -1,3 +1,4 @@
+use crate::cdc_types::StreamID;
 use async_trait::async_trait;
 use num_enum::TryFromPrimitive;
 use scylla::frame::response::result::{ColumnSpec, CqlValue, Row};
@@ -5,11 +6,12 @@ use std::collections::HashMap;
 
 #[async_trait]
 pub trait Consumer {
-    async fn consume_cdc(&mut self, data: CDCRow);
+    async fn consume_cdc(&mut self, data: CDCRow<'_>);
 }
 
+#[async_trait]
 pub trait ConsumerFactory {
-    fn new_consumer(&self) -> Box<dyn Consumer>;
+    async fn new_consumer(&self) -> Box<dyn Consumer>;
 }
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
@@ -110,7 +112,7 @@ impl CDCRowSchema {
 }
 
 pub struct CDCRow<'schema> {
-    pub stream_id: Vec<u8>,
+    pub stream_id: StreamID,
     pub time: uuid::Uuid,
     pub batch_seq_no: i32,
     pub end_of_batch: bool,
@@ -125,7 +127,7 @@ pub struct CDCRow<'schema> {
 impl CDCRow<'_> {
     pub fn from_row(row: Row, schema: &CDCRowSchema) -> CDCRow {
         // If cdc read was successful, these default values will not be used.
-        let mut stream_id = vec![];
+        let mut stream_id_vec = vec![];
         let mut time = uuid::Uuid::default();
         let mut batch_seq_no = i32::MAX;
         let mut end_of_batch = false;
@@ -138,7 +140,7 @@ impl CDCRow<'_> {
 
         for (i, column) in row.columns.into_iter().enumerate() {
             if i == schema.stream_id {
-                stream_id = column.unwrap().into_blob().unwrap();
+                stream_id_vec = column.unwrap().into_blob().unwrap();
             } else if i == schema.time {
                 time = column.unwrap().as_uuid().unwrap();
             } else if i == schema.batch_seq_no {
@@ -155,7 +157,7 @@ impl CDCRow<'_> {
         }
 
         CDCRow {
-            stream_id,
+            stream_id: StreamID { id: stream_id_vec },
             time,
             batch_seq_no,
             end_of_batch,
@@ -355,7 +357,7 @@ mod tests {
         let cdc_row = CDCRow::from_row(row, &schema);
 
         // Test against the default values in CDCRow::from_row
-        assert!(!cdc_row.stream_id.is_empty());
+        assert!(!cdc_row.stream_id.id.is_empty());
         assert_ne!(cdc_row.time, uuid::Uuid::default());
         assert_eq!(cdc_row.batch_seq_no, 0);
         assert!(cdc_row.end_of_batch);
