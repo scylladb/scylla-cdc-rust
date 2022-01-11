@@ -178,6 +178,16 @@ impl CDCRow<'_> {
             .unwrap()
     }
 
+    /// Allows to take a value from the column that corresponds to the logged table.
+    /// Leaves None in the corresponding column data.
+    /// Returns None if the value is null or such column doesn't exist.
+    pub fn take_value(&mut self, name: &str) -> Option<CqlValue> {
+        self.schema
+            .mapping
+            .get(name)
+            .and_then(|id| self.data[*id].take())
+    }
+
     /// Allows to get info if a value was deleted in this operation.
     /// Panics if the column does not exist in this table
     /// or the column is a part of primary key (because these values can't be deleted).
@@ -466,5 +476,24 @@ mod tests {
         assert_eq!(schema.mapping.len(), 3);
         assert_eq!(schema.deleted_mapping.len(), 1);
         assert_eq!(schema.deleted_el_mapping.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_take_value() {
+        let session = setup().await.unwrap();
+        let result = session
+            .query(
+                format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
+                (),
+            )
+            .await
+            .unwrap();
+
+        let row = result.rows.unwrap().remove(0);
+        let schema = CDCRowSchema::new(&result.col_specs);
+        let mut cdc_row = CDCRow::from_row(row, &schema);
+
+        assert_eq!(cdc_row.take_value("v").unwrap().as_int().unwrap(), 3);
+        assert!(cdc_row.take_value("no_such_column").is_none());
     }
 }
