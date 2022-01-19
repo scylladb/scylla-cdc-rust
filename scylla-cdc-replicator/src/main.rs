@@ -1,3 +1,4 @@
+mod replication_tests;
 pub mod replicator_consumer;
 
 use replicator_consumer::ReplicatorConsumerFactory;
