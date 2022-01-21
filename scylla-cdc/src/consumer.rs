@@ -1,6 +1,7 @@
 use crate::cdc_types::StreamID;
 use async_trait::async_trait;
 use num_enum::TryFromPrimitive;
+use scylla::frame::response::result::CqlValue::Set;
 use scylla::frame::response::result::{ColumnSpec, CqlValue, Row};
 use std::collections::HashMap;
 
@@ -180,6 +181,16 @@ impl CDCRow<'_> {
             .unwrap()
     }
 
+    /// Allows to take a value from the column that corresponds to the logged table.
+    /// Leaves None in the corresponding column data.
+    /// Returns None if the value is null or such column doesn't exist.
+    pub fn take_value(&mut self, name: &str) -> Option<CqlValue> {
+        self.schema
+            .mapping
+            .get(name)
+            .and_then(|id| self.data[*id].take())
+    }
+
     /// Allows to get info if a value was deleted in this operation.
     /// Panics if the column does not exist in this table
     /// or the column is a part of primary key (because these values can't be deleted).
@@ -207,6 +218,22 @@ impl CDCRow<'_> {
             Some(vec) => vec,
             None => &[],
         }
+    }
+
+    /// Allows to take deleted elements from a collection.
+    /// Returns new empty vector if the value is null or such column doesn't exist.
+    /// The returned value is always owned.
+    /// Leaves None in place of taken data.
+    pub fn take_deleted_elements(&mut self, name: &str) -> Vec<CqlValue> {
+        self.schema
+            .deleted_el_mapping
+            .get(name)
+            .and_then(|id| self.data[*id].take())
+            .and_then(|x| match x {
+                Set(x) => Some(x),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     pub fn column_exists(&self, name: &str) -> bool {
@@ -468,5 +495,58 @@ mod tests {
         assert_eq!(schema.mapping.len(), 3);
         assert_eq!(schema.deleted_mapping.len(), 1);
         assert_eq!(schema.deleted_el_mapping.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_take_value() {
+        let session = setup().await.unwrap();
+        let result = session
+            .query(
+                format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
+                (),
+            )
+            .await
+            .unwrap();
+
+        let row = result.rows.unwrap().remove(0);
+        let schema = CDCRowSchema::new(&result.col_specs);
+        let mut cdc_row = CDCRow::from_row(row, &schema);
+
+        assert_eq!(cdc_row.take_value("v").unwrap().as_int().unwrap(), 3);
+        assert!(cdc_row.take_value("no_such_column").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_take_deleted_elements() {
+        let session = setup().await.unwrap();
+        session
+            .query(
+                format!(
+                    "UPDATE {} SET vs = vs - ? WHERE pk = ? AND ck = ?",
+                    TEST_SINGLE_COLLECTION_TABLE
+                ),
+                (vec![2], 1, 2),
+            )
+            .await
+            .unwrap();
+        // We must allow filtering in order to search by cdc$operation.
+        let result = session
+            .query(format!("SELECT * FROM {} WHERE \"cdc$operation\" = ? AND pk = ? AND ck = ? ALLOW FILTERING;",
+                           TEST_SINGLE_COLLECTION_CDC_TABLE), (OperationType::RowUpdate as i8, 1, 2))
+            .await
+            .unwrap();
+
+        let row = result.rows.unwrap().remove(0);
+        let schema = CDCRowSchema::new(&result.col_specs);
+        let mut cdc_row = CDCRow::from_row(row, &schema);
+
+        let vec = cdc_row.take_deleted_elements("vs");
+
+        assert_eq!(vec.len(), 1);
+        assert_eq!(vec[0].as_int().unwrap(), 2);
+
+        let empty_vec = cdc_row.take_deleted_elements("non-existent-column");
+
+        assert!(empty_vec.is_empty());
     }
 }
