@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::frame::response::result::CqlValue;
+use scylla::frame::response::result::CqlValue::{Map, Set};
 use scylla::prepared_statement::PreparedStatement;
 use scylla::query::Query;
 use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
@@ -91,7 +92,44 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
-    // Recreates INSERT/DELETE statement on non-frozen map.
+    // Function replicates adding and deleting elements
+    // using v = v + {} and v = v - {} cql syntax to non-frozen map.
+    // Chained operations are supported.
+    async fn update_map_elements<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        values_for_update: &mut Vec<&'a CqlValue>,
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        let empty_map = Map(vec![]); // We have to declare it, because we can't take a reference to tmp value in unwrap.
+        let value = data.get_value(column_name).as_ref().unwrap_or(&empty_map);
+        // Order of values: ttl, added elements, pk condition values.
+
+        let deleted_set = Set(Vec::from(data.get_deleted_elements(column_name)));
+        let mut values_for_update: Vec<&CqlValue> = values_for_update.clone();
+
+        values_for_update[1] = value;
+        values_for_update.insert(2, &deleted_set);
+        // New order of values: ttl, added elements, deleted elements, pk condition values.
+
+        self.run_statement(
+            Query::new(format!(
+                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
+                ks = self.dest_keyspace_name,
+                tbl = self.dest_table_name,
+                cond = self.keys_cond,
+                cname = column_name,
+            )),
+            &values_for_update,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    // Recreates INSERT/DELETE/UPDATE statement on non-frozen map.
     async fn update_map<'a>(
         &self,
         column_name: &str,
@@ -110,12 +148,16 @@ impl ReplicatorConsumer {
                 timestamp,
             )
             .await?;
+        } else {
+            // adding/removing elements
+            self.update_map_elements(column_name, data, values_for_update, timestamp)
+                .await?;
         }
 
         Ok(())
     }
 
-    // Recreates INSERT/UPDATE/DELETE statement single column in a row.
+    // Recreates INSERT/UPDATE/DELETE statement for single column in a row.
     async fn overwrite_column<'a>(
         &self,
         column_name: &str,
