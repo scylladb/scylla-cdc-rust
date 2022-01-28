@@ -79,12 +79,16 @@ impl ReplicatorConsumer {
         (data.time.to_timestamp().unwrap().to_unix_nanos() / NANOS_IN_MILLIS) as i64
     }
 
-    async fn update(&self, data: CDCRow<'_>) {
-        self.update_or_insert(data, false).await;
+    async fn update(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        self.update_or_insert(data, false).await?;
+
+        Ok(())
     }
 
-    async fn insert(&self, data: CDCRow<'_>) {
-        self.update_or_insert(data, true).await;
+    async fn insert(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        self.update_or_insert(data, true).await?;
+
+        Ok(())
     }
 
     async fn update_atomic_or_frozen<'a>(
@@ -94,7 +98,7 @@ impl ReplicatorConsumer {
         values_for_update: &mut Vec<&'a CqlValue>,
         values_for_delete: &[&CqlValue],
         timestamp: i64,
-    ) {
+    ) -> anyhow::Result<()> {
         if let Some(value) = data.get_value(column_name) {
             // Order of values: ttl, inserted value, pk condition values.
             values_for_update[1] = value;
@@ -106,7 +110,7 @@ impl ReplicatorConsumer {
                 values_for_update,
                 timestamp,
             )
-            .await;
+            .await?;
         } else if data.is_value_deleted(column_name) {
             self.run_statement(
                 Query::new(format!(
@@ -116,11 +120,13 @@ impl ReplicatorConsumer {
                 values_for_delete,
                 timestamp,
             )
-            .await;
+            .await?;
         }
+
+        Ok(())
     }
 
-    async fn update_or_insert(&self, data: CDCRow<'_>, is_insert: bool) {
+    async fn update_or_insert(&self, data: CDCRow<'_>, is_insert: bool) -> anyhow::Result<()> {
         let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
         let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
         let timestamp = ReplicatorConsumer::get_timestamp(&data);
@@ -136,7 +142,7 @@ impl ReplicatorConsumer {
             insert_values.push(&ttl);
 
             self.run_prepared_statement(self.insert_query.clone(), &insert_values, timestamp)
-                .await;
+                .await?;
         }
 
         let mut values_for_update = Vec::with_capacity(2 + values.len());
@@ -156,11 +162,13 @@ impl ReplicatorConsumer {
                         &values,
                         timestamp,
                     )
-                    .await
+                    .await?
                 }
                 _ => todo!("This type of data can't be replicated yet!"),
             }
         }
+
+        Ok(())
     }
 
     async fn run_prepared_statement(
@@ -168,33 +176,36 @@ impl ReplicatorConsumer {
         mut query: PreparedStatement,
         values: &[&CqlValue],
         timestamp: i64,
-    ) {
+    ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
-        self.dest_session
-            .execute(&query, values)
-            .await
-            // If a query fails, the replication will not be done correctly, panic.
-            .expect("Querying the database failed!");
+        self.dest_session.execute(&query, values).await?;
+
+        Ok(())
     }
 
-    async fn run_statement(&self, mut query: Query, values: &[&CqlValue], timestamp: i64) {
+    async fn run_statement(
+        &self,
+        mut query: Query,
+        values: &[&CqlValue],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
-        self.dest_session
-            .query(query, values)
-            .await
-            // If a query fails, the replication will not be done correctly, panic.
-            .expect("Querying the database failed!");
+        self.dest_session.query(query, values).await?;
+
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Consumer for ReplicatorConsumer {
-    async fn consume_cdc(&mut self, data: CDCRow<'_>) {
+    async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         match data.operation {
-            OperationType::RowUpdate => self.update(data).await,
-            OperationType::RowInsert => self.insert(data).await,
+            OperationType::RowUpdate => self.update(data).await?,
+            OperationType::RowInsert => self.insert(data).await?,
             _ => todo!("This type of operation is not supported yet."),
         }
+
+        Ok(())
     }
 }
 
