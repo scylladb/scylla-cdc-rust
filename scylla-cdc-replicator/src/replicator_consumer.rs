@@ -87,23 +87,24 @@ impl ReplicatorConsumer {
         self.update_or_insert(data, true).await;
     }
 
-    async fn update_atomic_or_frozen<'a>(
+    async fn update_atomic_or_frozen(
         &self,
         column_name: &str,
-        data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<&'a CqlValue>,
-        values_for_delete: &[&CqlValue],
+        data: &CDCRow<'_>,
+        ttl: &CqlValue,
+        primary_key_values: &[&CqlValue],
         timestamp: i64,
     ) {
         if let Some(value) = data.get_value(column_name) {
-            // Order of values: ttl, inserted value, pk condition values.
-            values_for_update[1] = value;
+            let mut values = Vec::with_capacity(2 + primary_key_values.len());
+            values.extend([ttl, value]);
+            values.extend(primary_key_values.iter());
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
                     self.dest_keyspace_name, self.dest_table_name, column_name, self.keys_cond
                 )),
-                values_for_update,
+                &values,
                 timestamp,
             )
             .await;
@@ -113,7 +114,7 @@ impl ReplicatorConsumer {
                     "DELETE {} FROM {}.{} WHERE {}",
                     column_name, self.dest_keyspace_name, self.dest_table_name, self.keys_cond
                 )),
-                values_for_delete,
+                primary_key_values,
                 timestamp,
             )
             .await;
@@ -124,24 +125,19 @@ impl ReplicatorConsumer {
         let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
         let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
         let timestamp = ReplicatorConsumer::get_timestamp(&data);
-        let values = keys_iter
-            .clone()
+        let primary_key_values = keys_iter
             .map(|col_name| data.get_value(col_name).as_ref().unwrap())
             .collect::<Vec<&CqlValue>>();
 
         if is_insert {
             // Insert row with nulls, the rest will be done through an update.
-            let mut insert_values = Vec::with_capacity(values.len() + 1);
-            insert_values.extend(values.iter());
+            let mut insert_values = Vec::with_capacity(primary_key_values.len() + 1);
+            insert_values.extend(primary_key_values.iter());
             insert_values.push(&ttl);
 
             self.run_prepared_statement(self.insert_query.clone(), &insert_values, timestamp)
                 .await;
         }
-
-        let mut values_for_update = Vec::with_capacity(2 + values.len());
-        values_for_update.extend([&ttl, &CqlValue::Int(0)]);
-        values_for_update.extend(values.iter());
 
         for column_name in &self.non_key_columns {
             match self.table_schema.columns.get(column_name).unwrap().type_ {
@@ -152,8 +148,8 @@ impl ReplicatorConsumer {
                     self.update_atomic_or_frozen(
                         column_name,
                         &data,
-                        &mut values_for_update,
-                        &values,
+                        &ttl,
+                        &primary_key_values,
                         timestamp,
                     )
                     .await
