@@ -170,9 +170,11 @@ impl CDCRow<'_> {
     }
 
     /// Allows to get a value from the column that corresponds to the logged table.
-    /// Returns None if the value is null.
+    /// Returns `None` if the value is `null`.
     /// Panics if the column does not exist in this table.
-    /// To check if such column exists, use column_exists() method.
+    /// To check if such column exists, use [`column_exists`] method.
+    ///
+    /// [`column_exists`]: #method.column_exists
     pub fn get_value(&self, name: &str) -> &Option<CqlValue> {
         self.schema
             .mapping
@@ -182,8 +184,8 @@ impl CDCRow<'_> {
     }
 
     /// Allows to take a value from the column that corresponds to the logged table.
-    /// Leaves None in the corresponding column data.
-    /// Returns None if the value is null or such column doesn't exist.
+    /// Leaves `None` in the corresponding column data.
+    /// Returns `None` if the value is `null` or such column doesn't exist.
     pub fn take_value(&mut self, name: &str) -> Option<CqlValue> {
         self.schema
             .mapping
@@ -194,7 +196,9 @@ impl CDCRow<'_> {
     /// Allows to get info if a value was deleted in this operation.
     /// Panics if the column does not exist in this table
     /// or the column is a part of primary key (because these values can't be deleted).
-    /// To check if such column exists, use column_deletable() method.
+    /// To check if such column exists, use [`column_deletable`] method.
+    ///
+    /// [`column_deletable`]: #method.column_deletable
     pub fn is_value_deleted(&self, name: &str) -> bool {
         self.schema
             .deleted_mapping
@@ -204,9 +208,11 @@ impl CDCRow<'_> {
     }
 
     /// Allows to get deleted elements from a collection.
-    /// Returns empty slice if the value is null.
+    /// Returns empty slice if the value is `null`.
     /// Panics if the column does not exist in this table or is not a collection.
-    /// To check if such column exists, use collection_exists() method.
+    /// To check if such column exists, use [`collection_exists`] method.
+    ///
+    /// [`collection_exists`]: #method.collection_exists
     pub fn get_deleted_elements(&self, name: &str) -> &[CqlValue] {
         let val = self
             .schema
@@ -221,9 +227,9 @@ impl CDCRow<'_> {
     }
 
     /// Allows to take deleted elements from a collection.
-    /// Returns new empty vector if the value is null or such column doesn't exist.
+    /// Returns new empty vector if the value is `null` or such column doesn't exist.
     /// The returned value is always owned.
-    /// Leaves None in place of taken data.
+    /// Leaves `None` in place of taken data.
     pub fn take_deleted_elements(&mut self, name: &str) -> Vec<CqlValue> {
         self.schema
             .deleted_el_mapping

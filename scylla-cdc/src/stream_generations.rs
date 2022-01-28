@@ -78,7 +78,7 @@ impl GenerationFetcher {
     }
 
     /// Given a timestamp of an operation fetch generation that was operating when this operation was performed.
-    /// If no such generation exists, returns None.
+    /// If no such generation exists, returns `None`.
     /// Propagates errors.
     pub async fn fetch_generation_by_timestamp(
         &self,
@@ -109,7 +109,7 @@ impl GenerationFetcher {
     }
 
     /// Given a generation returns the next generation.
-    /// If given generation is currently operating, returns None.
+    /// If given generation is currently operating, returns `None`.
     /// Propagates errors.
     pub async fn fetch_next_generation(
         &self,
