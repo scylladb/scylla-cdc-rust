@@ -206,7 +206,7 @@ pub struct ReplicatorConsumerFactory {
 }
 
 impl ReplicatorConsumerFactory {
-    /// Creates a new instance of ReplicatorConsumerFactory.
+    /// Creates a new instance of `ReplicatorConsumerFactory`.
     /// Fetching schema metadata must be enabled in the session.
     pub fn new(
         dest_session: Arc<Session>,
