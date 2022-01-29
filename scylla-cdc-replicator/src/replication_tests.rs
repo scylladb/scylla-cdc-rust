@@ -125,7 +125,7 @@ mod tests {
         let schema = CDCRowSchema::new(&result.col_specs);
 
         for log in result.rows.unwrap_or(vec![]) {
-            consumer.consume_cdc(CDCRow::from_row(log, &schema)).await;
+            consumer.consume_cdc(CDCRow::from_row(log, &schema)).await?;
         }
 
         Ok(())

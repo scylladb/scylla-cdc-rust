@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 #[async_trait]
 pub trait Consumer {
-    async fn consume_cdc(&mut self, data: CDCRow<'_>);
+    async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()>;
 }
 
 #[async_trait]
