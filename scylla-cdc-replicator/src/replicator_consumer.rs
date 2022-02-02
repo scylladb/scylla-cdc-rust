@@ -170,6 +170,23 @@ impl ReplicatorConsumer {
         (ttl, timestamp, values)
     }
 
+    // Recreates row deletion.
+    async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
+
+        self.run_statement(
+            Query::new(format!(
+                "DELETE FROM {}.{} WHERE {}",
+                self.dest_keyspace_name, self.dest_table_name, self.keys_cond
+            )),
+            &values,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
     // Recreates INSERT/UPDATE/DELETE statement for single column in a row.
     async fn overwrite_column<'a>(
         &self,
@@ -300,6 +317,7 @@ impl Consumer for ReplicatorConsumer {
         match data.operation {
             OperationType::RowUpdate => self.update(data).await?,
             OperationType::RowInsert => self.insert(data).await?,
+            OperationType::RowDelete => self.delete_row(data).await?,
             _ => todo!("This type of operation is not supported yet."),
         }
 
