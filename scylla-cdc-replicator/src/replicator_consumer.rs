@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::anyhow;
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -7,8 +9,8 @@ use scylla::prepared_statement::PreparedStatement;
 use scylla::query::Query;
 use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
 use scylla::Session;
+
 use scylla_cdc::consumer::*;
-use std::sync::Arc;
 
 pub(crate) struct ReplicatorConsumer {
     dest_session: Arc<Session>,
@@ -19,6 +21,7 @@ pub(crate) struct ReplicatorConsumer {
 
     // Prepared queries.
     insert_query: PreparedStatement,
+    partition_delete_query: PreparedStatement,
 
     // Strings for queries created dynamically:
     keys_cond: String,
@@ -56,6 +59,19 @@ impl ReplicatorConsumer {
             .expect("Preparing insert query failed.");
 
         let keys_cond = keys_iter.map(|name| format!("{} = ?", name)).join(" AND ");
+        let partition_keys_cond = table_schema
+            .partition_key
+            .iter()
+            .map(|name| format!("{} = ?", name))
+            .join(" AND ");
+
+        let partition_delete_query = dest_session
+            .prepare(format!(
+                "DELETE FROM {}.{} WHERE {}",
+                dest_keyspace_name, dest_table_name, partition_keys_cond
+            ))
+            .await
+            .expect("Preparing partition delete query failed.");
 
         ReplicatorConsumer {
             dest_session,
@@ -64,6 +80,7 @@ impl ReplicatorConsumer {
             table_schema,
             non_key_columns,
             insert_query,
+            partition_delete_query,
             keys_cond,
         }
     }
@@ -78,6 +95,19 @@ impl ReplicatorConsumer {
     fn get_timestamp(data: &CDCRow<'_>) -> i64 {
         const NANOS_IN_MILLIS: u64 = 1000;
         (data.time.to_timestamp().unwrap().to_unix_nanos() / NANOS_IN_MILLIS) as i64
+    }
+
+    async fn delete_partition(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        let timestamp = ReplicatorConsumer::get_timestamp(&data);
+        let partition_keys_iter = self.table_schema.partition_key.iter();
+        let values = partition_keys_iter
+            .map(|col_name| data.get_value(col_name).as_ref().unwrap())
+            .collect::<Vec<&CqlValue>>();
+
+        self.run_prepared_statement(self.partition_delete_query.clone(), &values, timestamp)
+            .await?;
+
+        Ok(())
     }
 
     async fn update(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
@@ -334,6 +364,7 @@ impl Consumer for ReplicatorConsumer {
             OperationType::RowUpdate => self.update(data).await?,
             OperationType::RowInsert => self.insert(data).await?,
             OperationType::RowDelete => self.delete_row(data).await?,
+            OperationType::PartitionDelete => self.delete_partition(data).await?,
             _ => todo!("This type of operation is not supported yet."),
         }
 
