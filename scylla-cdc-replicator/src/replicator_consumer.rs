@@ -157,6 +157,36 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
+    // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
+    fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
+        let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
+        let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
+        let timestamp = ReplicatorConsumer::get_timestamp(data);
+        let values = keys_iter
+            .clone()
+            .map(|col_name| data.get_value(col_name).as_ref().unwrap())
+            .collect::<Vec<&CqlValue>>();
+
+        (ttl, timestamp, values)
+    }
+
+    // Recreates row deletion.
+    async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
+
+        self.run_statement(
+            Query::new(format!(
+                "DELETE FROM {}.{} WHERE {}",
+                self.dest_keyspace_name, self.dest_table_name, self.keys_cond
+            )),
+            &values,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
     // Recreates INSERT/UPDATE/DELETE statement for single column in a row.
     async fn overwrite_column<'a>(
         &self,
@@ -197,13 +227,7 @@ impl ReplicatorConsumer {
     }
 
     async fn update_or_insert(&self, data: CDCRow<'_>, is_insert: bool) -> anyhow::Result<()> {
-        let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
-        let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
-        let timestamp = ReplicatorConsumer::get_timestamp(&data);
-        let values = keys_iter
-            .clone()
-            .map(|col_name| data.get_value(col_name).as_ref().unwrap())
-            .collect::<Vec<&CqlValue>>();
+        let (ttl, timestamp, values) = self.get_common_cdc_row_data(&data);
 
         if is_insert {
             // Insert row with nulls, the rest will be done through an update.
@@ -293,6 +317,7 @@ impl Consumer for ReplicatorConsumer {
         match data.operation {
             OperationType::RowUpdate => self.update(data).await?,
             OperationType::RowInsert => self.insert(data).await?,
+            OperationType::RowDelete => self.delete_row(data).await?,
             _ => todo!("This type of operation is not supported yet."),
         }
 

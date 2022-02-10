@@ -409,4 +409,45 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn test_row_delete() {
+        let schema = TestTableSchema {
+            name: "ROW_DELETE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v1", "int"), ("v2", "boolean")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(1), Int(2), Int(3), Boolean(true)],
+            ),
+            (
+                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(10), Int(20), Int(30), Boolean(true)],
+            ),
+            (
+                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(100), Int(200), Int(300), Boolean(true)],
+            ),
+            (
+                "DELETE FROM ROW_DELETE WHERE pk = ? AND ck = ?",
+                vec![Int(1), Int(2)],
+            ),
+            (
+                "DELETE FROM ROW_DELETE WHERE pk = ? AND ck = ?",
+                vec![Int(-1), Int(-2)],
+            ),
+            (
+                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(-1), Int(-2), Int(30), Boolean(true)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
 }
