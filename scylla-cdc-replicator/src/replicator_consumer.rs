@@ -2,9 +2,10 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::frame::response::result::CqlValue;
+use scylla::frame::response::result::CqlValue::{Map, Set};
 use scylla::prepared_statement::PreparedStatement;
 use scylla::query::Query;
-use scylla::transport::topology::{ColumnKind, CqlType, Table};
+use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
 use scylla::Session;
 use scylla_cdc::consumer::*;
 use std::sync::Arc;
@@ -91,7 +92,73 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
-    async fn update_atomic_or_frozen<'a>(
+    // Function replicates adding and deleting elements
+    // using v = v + {} and v = v - {} cql syntax to non-frozen map.
+    // Chained operations are supported.
+    async fn update_map_elements<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        values_for_update: &mut Vec<&'a CqlValue>,
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        let empty_map = Map(vec![]); // We have to declare it, because we can't take a reference to tmp value in unwrap.
+        let value = data.get_value(column_name).as_ref().unwrap_or(&empty_map);
+        // Order of values: ttl, added elements, pk condition values.
+
+        let deleted_set = Set(Vec::from(data.get_deleted_elements(column_name)));
+        let mut values_for_update: Vec<&CqlValue> = values_for_update.clone();
+
+        values_for_update[1] = value;
+        values_for_update.insert(2, &deleted_set);
+        // New order of values: ttl, added elements, deleted elements, pk condition values.
+
+        self.run_statement(
+            Query::new(format!(
+                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
+                ks = self.dest_keyspace_name,
+                tbl = self.dest_table_name,
+                cond = self.keys_cond,
+                cname = column_name,
+            )),
+            &values_for_update,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    // Recreates INSERT/DELETE/UPDATE statement on non-frozen map.
+    async fn update_map<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_delete: &[&CqlValue],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        if data.is_value_deleted(column_name) {
+            // INSERT/DELETE/OVERWRITE
+            self.overwrite_column(
+                column_name,
+                data,
+                values_for_update,
+                values_for_delete,
+                timestamp,
+            )
+            .await?;
+        } else {
+            // adding/removing elements
+            self.update_map_elements(column_name, data, values_for_update, timestamp)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    // Recreates INSERT/UPDATE/DELETE statement for single column in a row.
+    async fn overwrite_column<'a>(
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
@@ -112,10 +179,13 @@ impl ReplicatorConsumer {
             )
             .await?;
         } else if data.is_value_deleted(column_name) {
+            // We have to use UPDATE with … = null syntax instead of a DELETE statement as
+            // DELETE will use incorrect timestamp for non-frozen collections. More info in the documentation:
+            // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
             self.run_statement(
                 Query::new(format!(
-                    "DELETE {} FROM {}.{} WHERE {}",
-                    column_name, self.dest_keyspace_name, self.dest_table_name, self.keys_cond
+                    "UPDATE {}.{} SET {} = NULL WHERE {}",
+                    self.dest_keyspace_name, self.dest_table_name, column_name, self.keys_cond
                 )),
                 values_for_delete,
                 timestamp,
@@ -150,12 +220,12 @@ impl ReplicatorConsumer {
         values_for_update.extend(values.iter());
 
         for column_name in &self.non_key_columns {
-            match self.table_schema.columns.get(column_name).unwrap().type_ {
+            match &self.table_schema.columns.get(column_name).unwrap().type_ {
                 CqlType::Native(_)
                 | CqlType::Tuple(_)
                 | CqlType::Collection { frozen: true, .. }
                 | CqlType::UserDefinedType { frozen: true, .. } => {
-                    self.update_atomic_or_frozen(
+                    self.overwrite_column(
                         column_name,
                         &data,
                         &mut values_for_update,
@@ -164,6 +234,27 @@ impl ReplicatorConsumer {
                     )
                     .await?
                 }
+                CqlType::Collection {
+                    frozen: false,
+                    type_: t,
+                } => match t {
+                    CollectionType::List(_) => {
+                        todo!("This type of data can't be replicated yet!")
+                    }
+                    CollectionType::Map(_, _) => {
+                        self.update_map(
+                            column_name,
+                            &data,
+                            &mut values_for_update,
+                            &values,
+                            timestamp,
+                        )
+                        .await?
+                    }
+                    CollectionType::Set(_) => {
+                        todo!("This type of data can't be replicated yet!")
+                    }
+                },
                 _ => todo!("This type of data can't be replicated yet!"),
             }
         }

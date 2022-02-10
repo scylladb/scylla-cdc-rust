@@ -3,6 +3,7 @@ mod tests {
     use crate::replicator_consumer::ReplicatorConsumer;
     use anyhow::anyhow;
     use itertools::Itertools;
+    use scylla::frame::response::result::CqlValue::{Boolean, Int, Map, Set};
     use scylla::frame::response::result::{CqlValue, Row};
     use scylla::{Session, SessionBuilder};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
@@ -265,6 +266,145 @@ mod tests {
             ),
         ];
 
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_map_insert() {
+        let schema = TestTableSchema {
+            name: "MAPS_INSERT".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v1", "map<int, int>"), ("v2", "map<int, boolean>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(0), Int(1), Map(vec![]), Map(vec![])],
+            ),
+            (
+                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(1), Int(2), Map(vec![(Int(1), Int(1))]), Map(vec![])],
+            ),
+            (
+                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![
+                    Int(3),
+                    Int(4),
+                    Map(vec![]),
+                    Map(vec![(Int(10), Boolean(true))]),
+                ],
+            ),
+            (
+                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![
+                    Int(5),
+                    Int(6),
+                    Map(vec![
+                        (Int(100), Int(100)),
+                        (Int(200), Int(200)),
+                        (Int(300), Int(300)),
+                    ]),
+                    Map(vec![(Int(400), Boolean(true)), (Int(500), Boolean(false))]),
+                ],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_map_update() {
+        let schema = TestTableSchema {
+            name: "MAPS_UPDATE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v1", "map<int, int>"), ("v2", "map<int, boolean>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO MAPS_UPDATE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![
+                    Int(1),
+                    Int(2),
+                    Map(vec![(Int(1), Int(1)), (Int(2), Int(2))]),
+                    Map(vec![(Int(1), Boolean(true))]),
+                ],
+            ),
+            (
+                "UPDATE MAPS_UPDATE SET v2 = ? WHERE pk = ? AND ck = ?",
+                vec![Map(vec![(Int(2), Boolean(true))]), Int(10), Int(20)],
+            ),
+            (
+                "DELETE v1 FROM MAPS_UPDATE WHERE pk = ? AND ck = ?",
+                vec![Int(1), Int(2)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_map_elements_update() {
+        let schema = TestTableSchema {
+            name: "MAP_ELEMENTS_UPDATE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v1", "map<int, int>"), ("v2", "map<int, boolean>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO MAP_ELEMENTS_UPDATE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![
+                    Int(1),
+                    Int(2),
+                    Map(vec![(Int(1), Int(-1))]),
+                    Map(vec![(Int(2), Boolean(false))]),
+                ],
+            ),
+            (
+                "INSERT INTO MAP_ELEMENTS_UPDATE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![
+                    Int(10),
+                    Int(20),
+                    Map(vec![(Int(10), Int(-10))]),
+                    Map(vec![(Int(11), Boolean(false))]),
+                ],
+            ),
+            (
+                "UPDATE MAP_ELEMENTS_UPDATE SET v2 = v2 + ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Map(vec![
+                        (Int(-21374134), Boolean(true)),
+                        (Int(-43142137), Boolean(false)),
+                    ]),
+                    Int(1),
+                    Int(2),
+                ],
+            ),
+            (
+                "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(10)]), Int(10), Int(20)],
+            ),
+            (
+                "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - ?, v1 = v1 + ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Set(vec![Int(1)]),
+                    Map(vec![(Int(2137), Int(-2137))]),
+                    Int(1),
+                    Int(2),
+                ],
+            ),
+        ];
         test_replication(&get_uri(), schema, operations)
             .await
             .unwrap();
