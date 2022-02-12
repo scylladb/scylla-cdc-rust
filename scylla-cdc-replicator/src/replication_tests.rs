@@ -450,4 +450,116 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn test_set_insert() {
+        let schema = TestTableSchema {
+            name: "SET_TEST".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "set<int>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(0), Int(1), Set(vec![])],
+            ),
+            (
+                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(1), Int(2), Set(vec![Int(1), Int(2)])],
+            ),
+            (
+                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(3), Int(4), Set(vec![Int(1), Int(1)])],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_set_overwrite() {
+        let schema = TestTableSchema {
+            name: "SET_TEST".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "set<int>")],
+        };
+
+        let operations = vec![
+            (
+                "UPDATE SET_TEST SET v = ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(-1), Int(-2)]), Int(0), Int(1)],
+            ),
+            (
+                "UPDATE SET_TEST SET v = ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(1), Int(2)]), Int(0), Int(1)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_set_delete() {
+        let schema = TestTableSchema {
+            name: "SET_TEST".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "set<int>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(0), Int(1), Set(vec![Int(0), Int(1)])],
+            ),
+            (
+                "DELETE v FROM SET_TEST WHERE pk = ? AND ck = ?",
+                vec![Int(0), Int(1)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_set_update() {
+        let schema = TestTableSchema {
+            name: "SET_TEST".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "set<int>")],
+        };
+
+        let operations = vec![
+            (
+                "UPDATE SET_TEST SET v = ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(1), Int(2)]), Int(0), Int(1)],
+            ),
+            (
+                "UPDATE SET_TEST SET v = v - ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(1)]), Int(0), Int(1)],
+            ),
+            (
+                "UPDATE SET_TEST SET v = v + ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(10), Int(20)]), Int(0), Int(1)],
+            ),
+            (
+                "UPDATE SET_TEST SET v = v - ?, v = v + ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Int(10)]), Set(vec![Int(200)]), Int(0), Int(1)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
 }
