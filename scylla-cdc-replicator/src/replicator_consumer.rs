@@ -22,6 +22,7 @@ pub(crate) struct ReplicatorConsumer {
     // Prepared queries.
     insert_query: PreparedStatement,
     partition_delete_query: PreparedStatement,
+    delete_query: PreparedStatement,
 
     // Strings for queries created dynamically:
     keys_cond: String,
@@ -73,6 +74,14 @@ impl ReplicatorConsumer {
             .await
             .expect("Preparing partition delete query failed.");
 
+        let delete_query = dest_session
+            .prepare(format!(
+                "DELETE FROM {}.{} WHERE {}",
+                dest_keyspace_name, dest_table_name, keys_cond
+            ))
+            .await
+            .expect("Preparing delete query failed.");
+
         ReplicatorConsumer {
             dest_session,
             dest_keyspace_name,
@@ -81,6 +90,7 @@ impl ReplicatorConsumer {
             non_key_columns,
             insert_query,
             partition_delete_query,
+            delete_query,
             keys_cond,
         }
     }
@@ -211,15 +221,8 @@ impl ReplicatorConsumer {
     async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
 
-        self.run_statement(
-            Query::new(format!(
-                "DELETE FROM {}.{} WHERE {}",
-                self.dest_keyspace_name, self.dest_table_name, self.keys_cond
-            )),
-            &values,
-            timestamp,
-        )
-        .await?;
+        self.run_prepared_statement(self.delete_query.clone(), &values, timestamp)
+            .await?;
 
         Ok(())
     }
