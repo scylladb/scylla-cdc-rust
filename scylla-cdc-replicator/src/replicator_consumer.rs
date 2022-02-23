@@ -93,17 +93,17 @@ impl ReplicatorConsumer {
     }
 
     // Function replicates adding and deleting elements
-    // using v = v + {} and v = v - {} cql syntax to non-frozen map.
+    // using v = v + {} and v = v - {} cql syntax to non-frozen map or set.
     // Chained operations are supported.
-    async fn update_map_elements<'a>(
+    async fn update_map_or_set_elements<'a>(
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut Vec<&'a CqlValue>,
         timestamp: i64,
+        sentinel: CqlValue,
     ) -> anyhow::Result<()> {
-        let empty_map = Map(vec![]); // We have to declare it, because we can't take a reference to tmp value in unwrap.
-        let value = data.get_value(column_name).as_ref().unwrap_or(&empty_map);
+        let value = data.get_value(column_name).as_ref().unwrap_or(&sentinel);
         // Order of values: ttl, added elements, pk condition values.
 
         let deleted_set = Set(Vec::from(data.get_deleted_elements(column_name)));
@@ -129,14 +129,15 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
-    // Recreates INSERT/DELETE/UPDATE statement on non-frozen map.
-    async fn update_map<'a>(
+    // Recreates INSERT/DELETE/UPDATE statement on non-frozen map or set.
+    async fn update_map_or_set<'a>(
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut Vec<&'a CqlValue>,
         values_for_delete: &[&CqlValue],
         timestamp: i64,
+        sentinel: CqlValue,
     ) -> anyhow::Result<()> {
         if data.is_value_deleted(column_name) {
             // INSERT/DELETE/OVERWRITE
@@ -150,8 +151,14 @@ impl ReplicatorConsumer {
             .await?;
         } else {
             // adding/removing elements
-            self.update_map_elements(column_name, data, values_for_update, timestamp)
-                .await?;
+            self.update_map_or_set_elements(
+                column_name,
+                data,
+                values_for_update,
+                timestamp,
+                sentinel,
+            )
+            .await?;
         }
 
         Ok(())
@@ -266,17 +273,26 @@ impl ReplicatorConsumer {
                         todo!("This type of data can't be replicated yet!")
                     }
                     CollectionType::Map(_, _) => {
-                        self.update_map(
+                        self.update_map_or_set(
                             column_name,
                             &data,
                             &mut values_for_update,
                             &values,
                             timestamp,
+                            Map(vec![]),
                         )
                         .await?
                     }
                     CollectionType::Set(_) => {
-                        todo!("This type of data can't be replicated yet!")
+                        self.update_map_or_set(
+                            column_name,
+                            &data,
+                            &mut values_for_update,
+                            &values,
+                            timestamp,
+                            Set(vec![]),
+                        )
+                        .await?
                     }
                 },
                 _ => todo!("This type of data can't be replicated yet!"),
