@@ -1,4 +1,4 @@
-mod cdc_types;
+pub mod cdc_types;
 pub mod consumer;
 pub mod reader;
 pub mod stream_generations;

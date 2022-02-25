@@ -5,7 +5,7 @@ use scylla::FromRow;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
 pub struct GenerationTimestamp {
-    pub(crate) timestamp: chrono::Duration,
+    pub timestamp: chrono::Duration,
 }
 
 impl Value for GenerationTimestamp {

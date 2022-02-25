@@ -1,10 +1,16 @@
+use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
+use futures::FutureExt;
 use scylla::batch::Consistency;
 use scylla::frame::response::result::Row;
 use scylla::frame::value::Timestamp;
 use scylla::query::Query;
 use scylla::{IntoTypedRows, Session};
 use std::sync::Arc;
+use std::time;
+use tokio::sync::mpsc;
+use tokio::time::sleep;
+use tracing::warn;
 
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 
@@ -171,6 +177,55 @@ impl GenerationFetcher {
         }
 
         Ok(None)
+    }
+
+    pub async fn fetch_generations_continuously(
+        self: Arc<Self>,
+        start_timestamp: chrono::Duration,
+        sleep_interval: time::Duration,
+    ) -> anyhow::Result<(mpsc::Receiver<GenerationTimestamp>, RemoteHandle<()>)> {
+        let (generation_sender, generation_receiver) = mpsc::channel(1);
+
+        let (future, future_handle) = async move {
+            let generation = loop {
+                match self.fetch_generation_by_timestamp(&start_timestamp).await {
+                    Ok(Some(generation)) => break generation,
+                    Ok(None) => {
+                        break {
+                            loop {
+                                match self.fetch_all_generations().await {
+                                    Ok(vectors) => match vectors.last() {
+                                        None => sleep(sleep_interval).await,
+                                        Some(generation) => break generation.clone(),
+                                    },
+                                    _ => warn!("Failed to fetch all generations"),
+                                }
+                            }
+                        }
+                    }
+                    _ => warn!("Failed to fetch generation by timestamp"),
+                }
+            };
+            if generation_sender.send(generation.clone()).await.is_err() {
+                return;
+            }
+
+            loop {
+                let generation = loop {
+                    match self.fetch_next_generation(&generation).await {
+                        Ok(Some(generation)) => break generation,
+                        Ok(None) => sleep(sleep_interval).await,
+                        _ => warn!("Failed to fetch next generation"),
+                    }
+                };
+                if generation_sender.send(generation).await.is_err() {
+                    break;
+                }
+            }
+        }
+        .remote_handle();
+        tokio::spawn(future);
+        Ok((generation_receiver, future_handle))
     }
 }
 
