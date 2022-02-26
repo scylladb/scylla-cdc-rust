@@ -147,7 +147,9 @@ mod tests {
                 "Number of rows not matching. Original table: {} rows, replicated table: {} rows.",
                 o, r
             ),
-            FailureReason::RowNotMatching(n) => eprintln!("Row {} is not equal in both tables.", n),
+            FailureReason::RowNotMatching(n) => {
+                eprintln!("Row {} is not equal in both tables.", n + 1)
+            }
             FailureReason::TimestampsNotMatching(row, column) => eprintln!(
                 "Timestamps were not equal for column {} in row {}.",
                 column,
@@ -189,7 +191,7 @@ mod tests {
                         name,
                         &original_rows,
                         &replicated_rows,
-                        FailureReason::RowNotMatching(i + 1),
+                        FailureReason::RowNotMatching(i),
                     );
                 }
             }
