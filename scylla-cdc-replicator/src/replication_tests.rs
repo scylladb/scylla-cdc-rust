@@ -125,7 +125,7 @@ mod tests {
 
         let schema = CDCRowSchema::new(&result.col_specs);
 
-        for log in result.rows.unwrap_or(vec![]) {
+        for log in result.rows.unwrap_or_default() {
             consumer.consume_cdc(CDCRow::from_row(log, &schema)).await?;
         }
 
@@ -166,12 +166,12 @@ mod tests {
             .query(format!("SELECT * FROM test_src.{}", name), ())
             .await?
             .rows
-            .unwrap_or(vec![]);
+            .unwrap_or_default();
         let replicated_rows = session
             .query(format!("SELECT * FROM test_dst.{}", name), ())
             .await?
             .rows
-            .unwrap_or(vec![]);
+            .unwrap_or_default();
 
         if original_rows.len() == replicated_rows.len() {
             for (i, (original, replicated)) in
@@ -555,6 +555,61 @@ mod tests {
             (
                 "UPDATE SET_TEST SET v = v - ?, v = v + ? WHERE pk = ? AND ck = ?",
                 vec![Set(vec![Int(10)]), Set(vec![Int(200)]), Int(0), Int(1)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_partition_delete() {
+        let schema = TestTableSchema {
+            name: "PARTITION_DELETE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "int")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO PARTITION_DELETE (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(0), Int(0), Int(0)],
+            ),
+            (
+                "INSERT INTO PARTITION_DELETE (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(0), Int(1), Int(1)],
+            ),
+            ("DELETE FROM PARTITION_DELETE WHERE pk = ?", vec![Int(0)]),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_partition_delete_with_multiple_pk() {
+        let schema = TestTableSchema {
+            name: "PARTITION_DELETE_MULT_PK".to_string(),
+            partition_key: vec![("pk1", "int"), ("pk2", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v1", "int"), ("v2", "boolean")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO PARTITION_DELETE_MULT_PK (pk1, pk2, ck, v1, v2) VALUES (?, ?, ?, ?, ?)",
+                vec![Int(0), Int(1), Int(0), Int(0), Boolean(true)],
+            ),
+            (
+                "INSERT INTO PARTITION_DELETE_MULT_PK (pk1, pk2, ck, v1, v2) VALUES (?, ?, ?, ?, ?)",
+                vec![Int(0), Int(2), Int(1), Int(1), Boolean(false)],
+            ),
+            (
+                "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = ? AND pk2 = ?",
+                vec![Int(0), Int(2)]
             ),
         ];
 
