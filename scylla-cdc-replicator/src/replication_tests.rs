@@ -4,7 +4,9 @@ mod tests {
     use anyhow::anyhow;
     use futures_util::FutureExt;
     use itertools::Itertools;
-    use scylla::frame::response::result::CqlValue::{Boolean, Int, List, Map, Set, Tuple};
+    use scylla::frame::response::result::CqlValue::{
+        Boolean, Int, List, Map, Set, Text, Tuple, UserDefinedType,
+    };
     use scylla::frame::response::result::{CqlValue, Row};
     use scylla::{Session, SessionBuilder};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
@@ -212,6 +214,33 @@ mod tests {
         panic!()
     }
 
+    fn equal_rows(original_row: &Row, replicated_row: &Row) -> bool {
+        if original_row.columns.len() != replicated_row.columns.len() {
+            return false;
+        }
+
+        let not_matching = original_row
+            .columns
+            .iter()
+            .zip(replicated_row.columns.iter())
+            .filter(|(o, r)| match (o, r) {
+                (
+                    Some(CqlValue::UserDefinedType {
+                        fields: original_fields,
+                        ..
+                    }),
+                    Some(CqlValue::UserDefinedType {
+                        fields: replicated_fields,
+                        ..
+                    }),
+                ) => original_fields != replicated_fields,
+                (_, _) => o != r,
+            })
+            .count();
+
+        not_matching == 0
+    }
+
     async fn compare_changes(session: &Session, name: &str) -> anyhow::Result<()> {
         let original_rows = session
             .query(format!("SELECT * FROM test_src.{}", name), ())
@@ -228,7 +257,7 @@ mod tests {
             for (i, (original, replicated)) in
                 original_rows.iter().zip(replicated_rows.iter()).enumerate()
             {
-                if original != replicated {
+                if !equal_rows(original, replicated) {
                     fail_test(
                         name,
                         &original_rows,
@@ -367,15 +396,88 @@ mod tests {
         setup_udts(&session, &udt_schemas).await?;
         setup_tables(&session, &table_schema).await?;
         execute_queries(&session, operations).await?;
-        replicate(&session, &schema.name).await?;
-        compare_changes(&session, &schema.name).await?;
-        compare_timestamps(&session, &schema).await?;
+        replicate(&session, &table_schema.name).await?;
+        compare_changes(&session, &table_schema.name).await?;
+        compare_timestamps(&session, &table_schema).await?;
 
         Ok(())
     }
 
     fn get_uri() -> String {
         std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
+    }
+
+    #[tokio::test]
+    async fn test_equal_rows_on_matching_rows() {
+        let original_row = Row {
+            columns: vec![
+                Some(Int(0)),
+                Some(Int(1)),
+                Some(Boolean(true)),
+                Some(UserDefinedType {
+                    keyspace: "some_ks".to_string(),
+                    type_name: "user_type".to_string(),
+                    fields: vec![
+                        ("int_val".to_string(), Some(Int(7))),
+                        ("text_val".to_string(), Some(Text("seven".to_string()))),
+                    ],
+                }),
+            ],
+        };
+
+        let replicated_row = Row {
+            columns: vec![
+                Some(Int(0)),
+                Some(Int(1)),
+                Some(Boolean(true)),
+                Some(UserDefinedType {
+                    keyspace: "another_ks".to_string(), // Not equal keyspaces should be ignored
+                    type_name: "user_type".to_string(),
+                    fields: vec![
+                        ("int_val".to_string(), Some(Int(7))),
+                        ("text_val".to_string(), Some(Text("seven".to_string()))),
+                    ],
+                }),
+            ],
+        };
+
+        let is_equal = equal_rows(&original_row, &replicated_row);
+
+        assert!(is_equal);
+    }
+
+    #[tokio::test]
+    async fn test_equal_rows_on_non_matching_rows() {
+        let original_row = Row {
+            columns: vec![
+                Some(Int(0)),
+                Some(Boolean(false)),
+                Some(UserDefinedType {
+                    keyspace: "some_ks".to_string(),
+                    type_name: "user_type".to_string(),
+                    fields: vec![
+                        ("int_val".to_string(), Some(Int(7))),
+                        ("text_val".to_string(), Some(Text("seven".to_string()))),
+                    ],
+                }),
+            ],
+        };
+
+        let replicated_rows = Row {
+            columns: vec![
+                Some(Int(0)),
+                Some(Boolean(false)),
+                Some(UserDefinedType {
+                    keyspace: "some_ks".to_string(),
+                    type_name: "user_type".to_string(),
+                    fields: vec![("text_val".to_string(), Some(Text("seven".to_string())))],
+                }),
+            ],
+        };
+
+        let is_equal = equal_rows(&original_row, &replicated_rows);
+
+        assert!(!is_equal);
     }
 
     #[tokio::test]
@@ -792,6 +894,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_udt_insert() {
+        let schema = TestTableSchema {
+            name: "TEST_UDT_INSERT".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "ut")],
+        };
+
+        let udt_schemas = vec![TestUDTSchema {
+            name: "ut".to_string(),
+            fields: vec![("int_val", "int"), ("bool_val", "boolean")],
+        }];
+
+        let operations = vec![
+            (
+                "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (?, ?, ?)",
+                vec![
+                    Int(0),
+                    Int(1),
+                    CqlValue::UserDefinedType {
+                        keyspace: "".to_string(),
+                        type_name: "ut".to_string(),
+                        fields: vec![
+                            ("int_val".to_string(), Some(Int(1))),
+                            ("bool_val".to_string(), Some(Boolean(true))),
+                        ],
+                    },
+                ],
+            ),
+            (
+                "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (?, ?, ?)",
+                vec![
+                    Int(1),
+                    Int(2),
+                    CqlValue::UserDefinedType {
+                        keyspace: "".to_string(),
+                        type_name: "ut".to_string(),
+                        fields: vec![
+                            ("int_val".to_string(), Some(Int(2))),
+                            ("bool_val".to_string(), Some(Boolean(false))),
+                        ],
+                    },
+                ],
+            ),
+            (
+                "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (?, ?, ?)",
+                vec![
+                    Int(3),
+                    Int(4),
+                    CqlValue::UserDefinedType {
+                        keyspace: "".to_string(),
+                        type_name: "ut".to_string(),
+                        fields: vec![
+                            ("int_val".to_string(), Some(Int(3))),
+                            ("bool_val".to_string(), Some(Boolean(true))),
+                        ],
+                    },
+                ],
+            ),
+        ];
+
+        test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_partition_delete_with_multiple_pk() {
         let schema = TestTableSchema {
             name: "PARTITION_DELETE_MULT_PK".to_string(),
@@ -845,6 +1014,62 @@ mod tests {
         ];
 
         test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_udt_update() {
+        let schema = TestTableSchema {
+            name: "TEST_UDT_UPDATE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "ut")],
+        };
+
+        let udt_schemas = vec![TestUDTSchema {
+            name: "ut".to_string(),
+            fields: vec![("int_val", "int"), ("bool_val", "boolean")],
+        }];
+
+        let operations = vec![
+            (
+                "INSERT INTO TEST_UDT_UPDATE (pk, ck, v) VALUES (?, ?, ?)",
+                vec![
+                    Int(0),
+                    Int(1),
+                    CqlValue::UserDefinedType {
+                        keyspace: "".to_string(),
+                        type_name: "ut".to_string(),
+                        fields: vec![
+                            ("int_val".to_string(), Some(Int(1))),
+                            ("bool_val".to_string(), Some(Boolean(true))),
+                        ],
+                    },
+                ],
+            ),
+            (
+                "UPDATE TEST_UDT_UPDATE SET v = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    CqlValue::UserDefinedType {
+                        keyspace: "".to_string(),
+                        type_name: "ut".to_string(),
+                        fields: vec![
+                            ("int_val".to_string(), Some(Int(3))),
+                            ("bool_val".to_string(), Some(Boolean(false))),
+                        ],
+                    },
+                    Int(0),
+                    Int(1),
+                ],
+            ),
+            (
+                "UPDATE TEST_UDT_UPDATE SET v = null WHERE pk = ? AND ck = ?",
+                vec![Int(0), Int(1)],
+            ),
+        ];
+
+        test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
             .await
             .unwrap();
     }
@@ -1012,6 +1237,62 @@ mod tests {
         ];
 
         test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_udt_fields_update() {
+        let schema = TestTableSchema {
+            name: "TEST_UDT_ELEMENTS_UPDATE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "ut")],
+        };
+
+        let udt_schemas = vec![TestUDTSchema {
+            name: "ut".to_string(),
+            fields: vec![("int_val", "int"), ("bool_val", "boolean")],
+        }];
+
+        let operations = vec![
+            (
+                "INSERT INTO TEST_UDT_ELEMENTS_UPDATE (pk, ck, v) VALUES (?, ?, ?)",
+                vec![
+                    Int(0),
+                    Int(1),
+                    CqlValue::UserDefinedType {
+                        keyspace: "".to_string(),
+                        type_name: "ut".to_string(),
+                        fields: vec![
+                            ("int_val".to_string(), Some(Int(1)))
+                        ]
+                    }
+                ],
+            ),
+            (
+                "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Int(2),
+                    Int(0),
+                    Int(1),
+                ],
+            ),
+            (
+                "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = ?, v.bool_val = null WHERE pk = ? AND ck = ?",
+                vec![Int(5), Int(0), Int(1)],
+            ),
+            (
+                "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null, v.bool_val = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Boolean(false),
+                    Int(0),
+                    Int(1),
+                ],
+            ),
+        ];
+
+        test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
             .await
             .unwrap();
     }

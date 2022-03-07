@@ -267,6 +267,107 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
+    // Function replicates adding and deleting elements in udt
+    async fn update_udt_elements<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        values_for_update: &mut Vec<&'a CqlValue>,
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        let empty_udt = CqlValue::UserDefinedType {
+            keyspace: "".to_string(),
+            type_name: "".to_string(),
+            fields: vec![],
+        };
+        let value = data.get_value(column_name).as_ref().unwrap_or(&empty_udt);
+        // Order of values: ttl, added elements, pk condition values.
+
+        let mut values_for_update: Vec<&CqlValue> = values_for_update.clone();
+        values_for_update[1] = value;
+
+        let update_query = format!(
+            "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
+            ks = self.dest_keyspace_name,
+            tbl = self.dest_table_name,
+            cname = column_name,
+            cond = self.keys_cond,
+        );
+
+        self.run_statement(Query::new(update_query), &values_for_update, timestamp)
+            .await?;
+
+        self.delete_udt_elements(column_name, data, timestamp, value, &mut values_for_update)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_udt_elements<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        timestamp: i64,
+        value: &CqlValue,
+        values_for_update: &mut Vec<&'a CqlValue>,
+    ) -> anyhow::Result<()> {
+        let deleted_set = Vec::from(data.get_deleted_elements(column_name));
+
+        if !deleted_set.is_empty() {
+            let udt_fields = value.as_udt().unwrap();
+            let removed_fields = deleted_set
+                .iter()
+                .map(|deleted_idx| {
+                    let idx = deleted_idx.as_smallint().unwrap();
+                    let (udt_fields_by_id, _) = udt_fields.get(idx as usize).unwrap();
+                    format!("{}.{} = null", column_name, udt_fields_by_id)
+                })
+                .join(",");
+
+            values_for_update.remove(1);
+
+            let remove_query = format!(
+                "UPDATE {ks}.{tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
+                ks = self.dest_keyspace_name,
+                tbl = self.dest_table_name,
+                removed_fields = removed_fields,
+                cond = self.keys_cond,
+            );
+
+            self.run_statement(Query::new(remove_query), values_for_update, timestamp)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn update_udt<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_delete: &[&CqlValue],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        if data.is_value_deleted(column_name) {
+            // INSERT/DELETE/OVERWRITE
+            self.overwrite_column(
+                column_name,
+                data,
+                values_for_update,
+                values_for_delete,
+                timestamp,
+            )
+            .await?;
+        } else {
+            // add/remove elements in udt
+            self.update_udt_elements(column_name, data, values_for_update, timestamp)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
     fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
         let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
@@ -402,7 +503,16 @@ impl ReplicatorConsumer {
                         .await?
                     }
                 },
-                _ => todo!("This type of data can't be replicated yet!"),
+                CqlType::UserDefinedType { frozen: false, .. } => {
+                    self.update_udt(
+                        column_name,
+                        &data,
+                        &mut values_for_update,
+                        &values,
+                        timestamp,
+                    )
+                    .await?
+                }
             }
         }
 
