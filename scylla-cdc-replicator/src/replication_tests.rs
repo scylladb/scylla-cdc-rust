@@ -3,7 +3,7 @@ mod tests {
     use crate::replicator_consumer::ReplicatorConsumer;
     use anyhow::anyhow;
     use itertools::Itertools;
-    use scylla::frame::response::result::CqlValue::{Boolean, Int, Map, Set};
+    use scylla::frame::response::result::CqlValue::{Boolean, Int, List, Map, Set};
     use scylla::frame::response::result::{CqlValue, Row};
     use scylla::{Session, SessionBuilder};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
@@ -610,6 +610,60 @@ mod tests {
             (
                 "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = ? AND pk2 = ?",
                 vec![Int(0), Int(2)]
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_update() {
+        let schema = TestTableSchema {
+            name: "LIST_ELEMENTS_UPDATE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "list<int>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO LIST_ELEMENTS_UPDATE (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(1), Int(2), List(vec![Int(0), Int(1), Int(1), Int(2)])],
+            ),
+            (
+                "UPDATE LIST_ELEMENTS_UPDATE SET v = v + ? WHERE pk = ? AND ck = ?",
+                vec![List(vec![Int(3), Int(5), Int(8), Int(13)]), Int(1), Int(2)],
+            ),
+            (
+                "UPDATE LIST_ELEMENTS_UPDATE SET v = v - ? WHERE pk = ? AND ck = ?",
+                vec![List(vec![Int(1), Int(5)]), Int(1), Int(2)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_replace() {
+        let schema = TestTableSchema {
+            name: "LIST_REPLACE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v", "list<int>")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO LIST_REPLACE (pk, ck, v) VALUES (?, ?, ?)",
+                vec![Int(1), Int(2), List(vec![Int(1), Int(3), Int(5), Int(7)])],
+            ),
+            (
+                "UPDATE LIST_REPLACE SET v = ? WHERE pk = ? AND ck = ?",
+                vec![List(vec![Int(2), Int(4), Int(6), Int(8)]), Int(1), Int(2)],
             ),
         ];
 

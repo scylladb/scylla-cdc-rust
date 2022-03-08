@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::frame::response::result::CqlValue;
 use scylla::frame::response::result::CqlValue::{Map, Set};
+use scylla::frame::value::Value;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::query::Query;
 use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
@@ -22,6 +23,7 @@ pub(crate) struct ReplicatorConsumer {
     // Prepared queries.
     insert_query: PreparedStatement,
     partition_delete_query: PreparedStatement,
+    delete_query: PreparedStatement,
 
     // Strings for queries created dynamically:
     keys_cond: String,
@@ -73,6 +75,14 @@ impl ReplicatorConsumer {
             .await
             .expect("Preparing partition delete query failed.");
 
+        let delete_query = dest_session
+            .prepare(format!(
+                "DELETE FROM {}.{} WHERE {}",
+                dest_keyspace_name, dest_table_name, keys_cond
+            ))
+            .await
+            .expect("Preparing delete query failed.");
+
         ReplicatorConsumer {
             dest_session,
             dest_keyspace_name,
@@ -81,6 +91,7 @@ impl ReplicatorConsumer {
             non_key_columns,
             insert_query,
             partition_delete_query,
+            delete_query,
             keys_cond,
         }
     }
@@ -194,6 +205,68 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
+    // Recreates INSERT/DELETE/UPDATE statement on non-frozen list.
+    async fn update_list<'a>(
+        &self,
+        column_name: &str,
+        data: &'a CDCRow<'_>,
+        values_for_update: &mut Vec<Option<&'a CqlValue>>,
+        pk_values: &[&CqlValue],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        if data.is_value_deleted(column_name) {
+            // If the list was replaced with syntax "(...) SET l = [(...)]",
+            // we have to manually delete the list
+            // and add every element with timeuuid from the original table,
+            // because we want to preserve the timestamps of the list elements.
+            // More information:
+            // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
+            self.run_statement(
+                Query::new(format!(
+                    "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
+                    ks = self.dest_keyspace_name,
+                    tbl = self.dest_table_name,
+                    col = column_name,
+                    cond = self.keys_cond,
+                )),
+                pk_values,
+                timestamp,
+            )
+            .await?;
+        }
+
+        // We use the same query for updating and deleting values.
+        // In case of deleting, we simply set the value to null.
+        let update_query = Query::new(format!(
+            "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
+            ks = self.dest_keyspace_name,
+            tbl = self.dest_table_name,
+            list = column_name,
+            cond = self.keys_cond
+        ));
+
+        if let Some(added_elements) = data.get_value(column_name) {
+            let added_elements = added_elements.as_map().unwrap();
+            for (key, val) in added_elements {
+                values_for_update[1] = Some(key);
+                values_for_update[2] = Some(val);
+
+                self.run_statement(update_query.clone(), values_for_update, timestamp)
+                    .await?;
+            }
+        }
+
+        for removed in data.get_deleted_elements(column_name) {
+            values_for_update[1] = Some(removed);
+            values_for_update[2] = None;
+
+            self.run_statement(update_query.clone(), values_for_update, timestamp)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
     fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
         let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
@@ -211,15 +284,8 @@ impl ReplicatorConsumer {
     async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
 
-        self.run_statement(
-            Query::new(format!(
-                "DELETE FROM {}.{} WHERE {}",
-                self.dest_keyspace_name, self.dest_table_name, self.keys_cond
-            )),
-            &values,
-            timestamp,
-        )
-        .await?;
+        self.run_prepared_statement(self.delete_query.clone(), &values, timestamp)
+            .await?;
 
         Ok(())
     }
@@ -280,6 +346,10 @@ impl ReplicatorConsumer {
         values_for_update.extend([&ttl, &CqlValue::Int(0)]);
         values_for_update.extend(values.iter());
 
+        let mut values_for_list_update = Vec::with_capacity(3 + values.len());
+        values_for_list_update.extend([Some(&ttl), None, None]);
+        values_for_list_update.extend(values.iter().map(|x| Some(*x)));
+
         for column_name in &self.non_key_columns {
             match &self.table_schema.columns.get(column_name).unwrap().type_ {
                 CqlType::Native(_)
@@ -300,7 +370,14 @@ impl ReplicatorConsumer {
                     type_: t,
                 } => match t {
                     CollectionType::List(_) => {
-                        todo!("This type of data can't be replicated yet!")
+                        self.update_list(
+                            column_name,
+                            &data,
+                            &mut values_for_list_update,
+                            &values,
+                            timestamp,
+                        )
+                        .await?
                     }
                     CollectionType::Map(_, _) => {
                         self.update_map_or_set(
@@ -335,7 +412,7 @@ impl ReplicatorConsumer {
     async fn run_prepared_statement(
         &self,
         mut query: PreparedStatement,
-        values: &[&CqlValue],
+        values: &[impl Value],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
@@ -347,7 +424,7 @@ impl ReplicatorConsumer {
     async fn run_statement(
         &self,
         mut query: Query,
-        values: &[&CqlValue],
+        values: &[impl Value],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
