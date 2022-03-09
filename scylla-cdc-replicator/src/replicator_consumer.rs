@@ -468,10 +468,10 @@ impl ReplicatorConsumerFactory {
             .get_cluster_data()
             .get_keyspace_info()
             .get(&dest_keyspace_name)
-            .ok_or(anyhow!("Keyspace not found"))?
+            .ok_or_else(|| anyhow!("Keyspace not found"))?
             .tables
             .get(&dest_table_name.to_ascii_lowercase())
-            .ok_or(anyhow!("Table not found"))?
+            .ok_or_else(|| anyhow!("Table not found"))?
             .clone();
 
         Ok(ReplicatorConsumerFactory {
