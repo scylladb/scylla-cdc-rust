@@ -111,10 +111,10 @@ mod tests {
             .get_cluster_data()
             .get_keyspace_info()
             .get("test_dst")
-            .ok_or(anyhow!("Keyspace not found"))?
+            .ok_or_else(|| anyhow!("Keyspace not found"))?
             .tables
             .get(&name.to_ascii_lowercase())
-            .ok_or(anyhow!("Table not found"))?
+            .ok_or_else(|| anyhow!("Table not found"))?
             .clone();
 
         let mut consumer = ReplicatorConsumer::new(
