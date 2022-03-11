@@ -2,8 +2,9 @@
 mod tests {
     use crate::replicator_consumer::ReplicatorConsumer;
     use anyhow::anyhow;
+    use futures_util::FutureExt;
     use itertools::Itertools;
-    use scylla::frame::response::result::CqlValue::{Boolean, Int, List, Map, Set};
+    use scylla::frame::response::result::CqlValue::{Boolean, Int, List, Map, Set, Tuple};
     use scylla::frame::response::result::{CqlValue, Row};
     use scylla::{Session, SessionBuilder};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
@@ -29,6 +30,7 @@ mod tests {
     enum FailureReason {
         WrongRowsCount(usize, usize),
         RowNotMatching(usize),
+        TimestampsNotMatching(usize, String),
     }
 
     async fn setup_tables(session: &Session, schema: &TestTableSchema<'_>) -> anyhow::Result<()> {
@@ -145,7 +147,14 @@ mod tests {
                 "Number of rows not matching. Original table: {} rows, replicated table: {} rows.",
                 o, r
             ),
-            FailureReason::RowNotMatching(n) => eprintln!("Row {} is not equal in both tables.", n),
+            FailureReason::RowNotMatching(n) => {
+                eprintln!("Row {} is not equal in both tables.", n + 1)
+            }
+            FailureReason::TimestampsNotMatching(row, column) => eprintln!(
+                "Timestamps were not equal for column {} in row {}.",
+                column,
+                row + 1
+            ),
         }
 
         eprintln!("ORIGINAL TABLE:");
@@ -182,7 +191,7 @@ mod tests {
                         name,
                         &original_rows,
                         &replicated_rows,
-                        FailureReason::RowNotMatching(i + 1),
+                        FailureReason::RowNotMatching(i),
                     );
                 }
             }
@@ -198,6 +207,99 @@ mod tests {
         Ok(())
     }
 
+    // Returns vector of timestamps of given column from all rows.
+    async fn get_timestamps(
+        session: &Session,
+        table_name: &str,
+        column_name: &str,
+    ) -> anyhow::Result<(Vec<Row>, Vec<Row>)> {
+        let original_rows = session
+            .query(
+                format!(
+                    "SELECT WRITETIME ({}) FROM test_src.{}",
+                    column_name, table_name
+                ),
+                (),
+            )
+            .await?
+            .rows
+            .unwrap_or_default();
+        let replicated_rows = session
+            .query(
+                format!(
+                    "SELECT WRITETIME ({}) FROM test_dst.{}",
+                    column_name, table_name
+                ),
+                (),
+            )
+            .await?
+            .rows
+            .unwrap_or_default();
+
+        Ok((original_rows, replicated_rows))
+    }
+
+    // Given a type name returns a boolean value indicating if
+    // the cql `WRITETIME` function can be used on a column of this type.
+    fn can_read_timestamps(col_type: &&str) -> bool {
+        const NATIVE_TYPES: [&str; 21] = [
+            "ascii",
+            "bigint",
+            "blob",
+            "boolean",
+            "counter",
+            "date",
+            "decimal",
+            "double",
+            "duration",
+            "float",
+            "inet",
+            "int",
+            "smallint",
+            "text",
+            "varchar",
+            "time",
+            "timestamp",
+            "timeuuid",
+            "tinyint",
+            "uuid",
+            "varint",
+        ];
+
+        NATIVE_TYPES.contains(col_type)
+            || col_type.starts_with("frozen<")
+            || col_type.starts_with("tuple<")
+    }
+
+    // Compares timestamps of all non-partition and non-clustering columns between destination table and source table.
+    // Since cql function `WRITETIME` doesn't work for collections as per https://issues.apache.org/jira/browse/CASSANDRA-8877,
+    // we check beforehand if column's type can be read via the `WRITETIME` function and either compare timestamps or skip them.
+    async fn compare_timestamps(
+        session: &Session,
+        schema: &TestTableSchema<'_>,
+    ) -> anyhow::Result<()> {
+        for (col_name, col_type) in &schema.other_columns {
+            if can_read_timestamps(col_type) {
+                let (original_rows, replicated_rows) =
+                    get_timestamps(session, &schema.name, col_name).await?;
+
+                for (i, (original, replicated)) in
+                    original_rows.iter().zip(replicated_rows.iter()).enumerate()
+                {
+                    if original != replicated {
+                        fail_test(
+                            &schema.name,
+                            &original_rows,
+                            &replicated_rows,
+                            FailureReason::TimestampsNotMatching(i, col_name.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Function that tests replication process.
     /// Different tests in the same cluster must have different table names.
     async fn test_replication(
@@ -210,6 +312,7 @@ mod tests {
         execute_queries(&session, operations).await?;
         replicate(&session, &schema.name).await?;
         compare_changes(&session, &schema.name).await?;
+        compare_timestamps(&session, &schema).await?;
         Ok(())
     }
 
@@ -664,6 +767,148 @@ mod tests {
             (
                 "UPDATE LIST_REPLACE SET v = ? WHERE pk = ? AND ck = ?",
                 vec![List(vec![Int(2), Int(4), Int(6), Int(8)]), Int(1), Int(2)],
+            ),
+        ];
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_checking_timestamps() {
+        let schema = TestTableSchema {
+            name: "COMPARE_TIME".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![("v1", "int"), ("v2", "boolean")],
+        };
+
+        let operations = vec![
+            (
+                "INSERT INTO COMPARE_TIME (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
+                vec![Int(1), Int(2), Int(3), Boolean(true)],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v2 = ? WHERE pk = ? AND ck = ?",
+                vec![Boolean(false), Int(1), Int(2)],
+            ),
+        ];
+
+        let session = Arc::new(
+            SessionBuilder::new()
+                .known_node(&get_uri())
+                .build()
+                .await
+                .unwrap(),
+        );
+        setup_tables(&session, &schema).await.unwrap();
+        execute_queries(&session, operations).await.unwrap();
+
+        replicate(&session, &schema.name).await.unwrap();
+
+        compare_changes(&session, &schema.name).await.unwrap();
+        // We update timestamps for v2 column in src.
+        session
+            .query(
+                "UPDATE COMPARE_TIME SET v2 = ? WHERE pk = ? AND ck = ?",
+                (false, 1, 2),
+            )
+            .await
+            .unwrap();
+
+        // Assert that replicator panics when timestamps are not matching.
+        let result = std::panic::AssertUnwindSafe(compare_timestamps(&session, &schema))
+            .catch_unwind()
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_compare_time_for_complicated_types() {
+        let schema = TestTableSchema {
+            name: "COMPARE_TIME".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck", "int")],
+            other_columns: vec![
+                ("v1", "tuple<int, int>"),
+                ("v2", "map<int, int>"),
+                ("v3", "set<frozen<map<int, int>>>"),
+                ("v4", "tuple<map<int, int>>"),
+                ("v5", "frozen<set<frozen<set<frozen<set<int>>>>>>"),
+                ("v6", "tuple<tuple<map<int, int>, set<int>>, int>"),
+                ("v7", "set<frozen<tuple<set<int>, map<int, int>>>>"),
+            ],
+        };
+
+        let operations = vec![
+            (
+                "UPDATE COMPARE_TIME SET v1 = ? WHERE pk = ? AND ck = ?",
+                vec![Tuple(vec![Some(Int(0)), Some(Int(0))]), Int(1), Int(1)],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v2 = ? WHERE pk = ? AND ck = ?",
+                vec![Map(vec![(Int(1), Int(1))]), Int(2), Int(2)],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v3 = ? WHERE pk = ? AND ck = ?",
+                vec![Set(vec![Map(vec![(Int(1), Int(1))])]), Int(3), Int(3)],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v4 = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Tuple(vec![Some(Map(vec![(Int(1), Int(1))]))]),
+                    Int(4),
+                    Int(4),
+                ],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v5 = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Set(vec![Set(vec![Set(vec![Int(10), Int(-10)])])]),
+                    Int(5),
+                    Int(5),
+                ],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v6 = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Tuple(vec![
+                        Some(Tuple(vec![
+                            Some(Map(vec![(Int(20), Int(30))])),
+                            Some(Set(vec![Int(4324)])),
+                        ])),
+                        None,
+                    ]),
+                    Int(6),
+                    Int(6),
+                ],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v7 = ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Set(vec![Tuple(vec![
+                        Some(Set(vec![Int(4324)])),
+                        Some(Map(vec![(Int(42), Int(42))])),
+                    ])]),
+                    Int(5),
+                    Int(5),
+                ],
+            ),
+            (
+                "UPDATE COMPARE_TIME SET v7 = v7 + ? WHERE pk = ? AND ck = ?",
+                vec![
+                    Set(vec![Tuple(vec![
+                        Some(Set(vec![Int(-4324)])),
+                        Some(Map(vec![(Int(-42), Int(-42))])),
+                    ])]),
+                    Int(5),
+                    Int(5),
+                ],
+            ),
+            (
+                "DELETE v4 FROM COMPARE_TIME WHERE pk = ? AND CK = ?",
+                vec![Int(4), Int(4)],
             ),
         ];
 
