@@ -212,7 +212,6 @@ mod tests {
                 )
                 .await?;
         }
-        session.await_schema_agreement().await?;
 
         Ok(())
     }
