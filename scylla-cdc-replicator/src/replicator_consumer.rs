@@ -507,18 +507,18 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
         timestamp: i64,
         sentinel: CqlValue,
     ) -> anyhow::Result<()> {
-        let value = data.get_value(column_name).as_ref().unwrap_or(&sentinel);
+        let value = Some(data.get_value(column_name).as_ref().unwrap_or(&sentinel));
         // Order of values: ttl, added elements, pk condition values.
 
         let deleted_set = Set(Vec::from(data.get_deleted_elements(column_name)));
         let mut values_for_update = values_for_update.to_vec();
 
         values_for_update[1] = value;
-        values_for_update.insert(2, &deleted_set);
+        values_for_update.insert(2, Some(&deleted_set));
         // New order of values: ttl, added elements, deleted elements, pk condition values.
 
         self.precomputed_queries
@@ -533,8 +533,8 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
-        values_for_delete: &[&CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_delete: &[Option<&CqlValue>],
         timestamp: i64,
         sentinel: CqlValue,
     ) -> anyhow::Result<()> {
@@ -569,7 +569,7 @@ impl ReplicatorConsumer {
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [Option<&'a CqlValue>],
-        pk_values: &[&CqlValue],
+        pk_values: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         if data.is_value_deleted(column_name) {
@@ -607,7 +607,7 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         let empty_udt = CqlValue::UserDefinedType {
@@ -619,7 +619,7 @@ impl ReplicatorConsumer {
         // Order of values: ttl, added elements, pk condition values.
 
         let values_for_update = &mut values_for_update.to_vec();
-        values_for_update[1] = value;
+        values_for_update[1] = Some(value);
 
         self.precomputed_queries
             .update_udt_elements(values_for_update, timestamp, column_name)
@@ -637,7 +637,7 @@ impl ReplicatorConsumer {
         data: &'a CDCRow<'_>,
         timestamp: i64,
         value: &CqlValue,
-        values_for_update: &mut [&'a CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
     ) -> anyhow::Result<()> {
         let deleted_set = Vec::from(data.get_deleted_elements(column_name));
 
@@ -667,8 +667,8 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
-        values_for_delete: &[&CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_delete: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         if data.is_value_deleted(column_name) {
@@ -691,14 +691,16 @@ impl ReplicatorConsumer {
     }
 
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
-    fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
+    fn get_common_cdc_row_data<'a>(
+        &self,
+        data: &'a CDCRow,
+    ) -> (CqlValue, i64, Vec<Option<&'a CqlValue>>) {
         let keys_iter = get_keys_iter(&self.source_table_data.table_schema);
         let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
         let timestamp = ReplicatorConsumer::get_timestamp(data);
         let values = keys_iter
-            .clone()
-            .map(|col_name| data.get_value(col_name).as_ref().unwrap())
-            .collect::<Vec<&CqlValue>>();
+            .map(|col_name| data.get_value(col_name).as_ref())
+            .collect();
 
         (ttl, timestamp, values)
     }
@@ -718,13 +720,13 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
-        values_for_delete: &[&CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_delete: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
-        if let Some(value) = data.get_value(column_name) {
+        if let value @ Some(_) = data.get_value(column_name) {
             // Order of values: ttl, inserted value, pk condition values.
-            values_for_update[1] = value;
+            values_for_update[1] = value.as_ref();
             self.precomputed_queries
                 .overwrite_value(values_for_update, timestamp, column_name)
                 .await?;
@@ -744,7 +746,7 @@ impl ReplicatorConsumer {
             // Insert row with nulls, the rest will be done through an update.
             let mut insert_values = Vec::with_capacity(values.len() + 1);
             insert_values.extend(values.iter());
-            insert_values.push(&ttl);
+            insert_values.push(Some(&ttl));
 
             self.precomputed_queries
                 .insert_value(&insert_values, timestamp)
@@ -752,12 +754,12 @@ impl ReplicatorConsumer {
         }
 
         let mut values_for_update = Vec::with_capacity(2 + values.len());
-        values_for_update.extend([&ttl, &CqlValue::Int(0)]);
+        values_for_update.extend([Some(&ttl), Some(&CqlValue::Int(0))]);
         values_for_update.extend(values.iter());
 
         let mut values_for_list_update = Vec::with_capacity(3 + values.len());
         values_for_list_update.extend([Some(&ttl), None, None]);
-        values_for_list_update.extend(values.iter().map(|x| Some(*x)));
+        values_for_list_update.extend(values.iter());
 
         for column_name in &self.source_table_data.non_key_columns.clone() {
             match &self
