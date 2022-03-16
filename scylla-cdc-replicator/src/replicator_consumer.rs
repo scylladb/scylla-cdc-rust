@@ -430,6 +430,10 @@ struct SourceTableData {
 pub(crate) struct ReplicatorConsumer {
     source_table_data: SourceTableData,
     precomputed_queries: PrecomputedQueries,
+
+    // Stores data for left side range delete while waiting for its right counterpart.
+    left_range_included: bool,
+    left_range_values: Vec<Option<CqlValue>>,
 }
 
 impl ReplicatorConsumer {
@@ -466,6 +470,8 @@ impl ReplicatorConsumer {
         ReplicatorConsumer {
             source_table_data,
             precomputed_queries,
+            left_range_included: false,
+            left_range_values: vec![],
         }
     }
 
@@ -690,6 +696,128 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
+    fn delete_row_range_left(&mut self, mut data: CDCRow<'_>, included: bool) {
+        self.left_range_included = included;
+        self.left_range_values =
+            take_clustering_keys_values(&self.source_table_data.table_schema, &mut data);
+    }
+
+    async fn delete_row_range_right(
+        &mut self,
+        data: CDCRow<'_>,
+        right_included: bool,
+    ) -> anyhow::Result<()> {
+        let table_schema = &self.source_table_data.table_schema;
+        if table_schema.clustering_key.is_empty() {
+            return Ok(());
+        }
+
+        let values_left = std::mem::take(&mut self.left_range_values);
+        let values_left = values_left.iter().map(|x| x.as_ref()).collect::<Vec<_>>();
+
+        let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
+
+        let values_right = &values[table_schema.partition_key.len()..];
+
+        let first_unequal_position = values_left
+            .iter()
+            .zip(values_right.iter())
+            .position(|pair| pair.0 != pair.1)
+            .unwrap_or(table_schema.clustering_key.len());
+
+        let keys_equality_cond = table_schema
+            .partition_key
+            .iter()
+            .map(|name| format!("{} = ?", name))
+            .join(" AND ");
+
+        let mut conditions = vec![keys_equality_cond];
+
+        let mut query_values = values[..table_schema.partition_key.len()].to_vec();
+
+        let less_than = if right_included { "<=" } else { "<" };
+        let greater_than = if self.left_range_included { ">=" } else { ">" };
+
+        self.add_range_condition(
+            &mut conditions,
+            &mut query_values,
+            &values_left,
+            first_unequal_position,
+            greater_than,
+        );
+        self.add_range_condition(
+            &mut conditions,
+            &mut query_values,
+            values_right,
+            first_unequal_position,
+            less_than,
+        );
+
+        let query = Query::new(format!(
+            "DELETE FROM {}.{} WHERE {}",
+            self.precomputed_queries
+                .destination_table_params
+                .dest_keyspace_name,
+            self.precomputed_queries
+                .destination_table_params
+                .dest_table_name,
+            conditions.join(" AND ")
+        ));
+
+        run_statement(
+            &self
+                .precomputed_queries
+                .destination_table_params
+                .dest_session,
+            query,
+            &query_values,
+            timestamp,
+        )
+        .await
+    }
+
+    fn add_range_condition<'a>(
+        &self,
+        conditions: &mut Vec<String>,
+        query_values: &mut Vec<Option<&'a CqlValue>>,
+        values: &[Option<&'a CqlValue>],
+        first_unequal_position: usize,
+        relation: &str,
+    ) {
+        let (condition, new_query_values) =
+            self.generate_range_condition(values, first_unequal_position, relation);
+        if !new_query_values.is_empty() {
+            conditions.push(condition);
+            query_values.extend(new_query_values.iter());
+        }
+    }
+
+    fn generate_range_condition<'a>(
+        &self,
+        values: &[Option<&'a CqlValue>],
+        starting_position: usize,
+        relation: &str,
+    ) -> (String, Vec<Option<&'a CqlValue>>) {
+        let table_schema = &self.source_table_data.table_schema;
+        let first_null_index = values[starting_position..]
+            .iter()
+            .position(|x| x.is_none())
+            .map_or(table_schema.clustering_key.len(), |x| x + starting_position);
+
+        let condition = format!(
+            "({}) {} ({})",
+            table_schema.clustering_key[..first_null_index]
+                .iter()
+                .join(","),
+            relation,
+            std::iter::repeat("?").take(first_null_index).join(",")
+        );
+
+        let query_values = values[..first_null_index].to_vec();
+
+        (condition, query_values)
+    }
+
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
     fn get_common_cdc_row_data<'a>(
         &self,
@@ -844,6 +972,14 @@ fn get_keys_iter(table_schema: &Table) -> impl std::iter::Iterator<Item = &Strin
         .chain(table_schema.clustering_key.iter())
 }
 
+fn take_clustering_keys_values(table_schema: &Table, data: &mut CDCRow) -> Vec<Option<CqlValue>> {
+    table_schema
+        .clustering_key
+        .iter()
+        .map(|ck| data.take_value(ck))
+        .collect()
+}
+
 #[async_trait]
 impl Consumer for ReplicatorConsumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
@@ -852,6 +988,10 @@ impl Consumer for ReplicatorConsumer {
             OperationType::RowInsert => self.insert(data).await?,
             OperationType::RowDelete => self.delete_row(data).await?,
             OperationType::PartitionDelete => self.delete_partition(data).await?,
+            OperationType::RowRangeDelExclLeft => self.delete_row_range_left(data, false),
+            OperationType::RowRangeDelInclLeft => self.delete_row_range_left(data, true),
+            OperationType::RowRangeDelExclRight => self.delete_row_range_right(data, false).await?,
+            OperationType::RowRangeDelInclRight => self.delete_row_range_right(data, true).await?,
             _ => todo!("This type of operation is not supported yet."),
         }
 

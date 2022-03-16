@@ -978,4 +978,31 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn test_range_delete() {
+        let schema = TestTableSchema {
+            name: "RANGE_DELETE".to_string(),
+            partition_key: vec![("pk1", "int"), ("pk2", "int")],
+            clustering_key: vec![("ck1", "int"), ("ck2", "int"), ("ck3", "int")],
+            other_columns: vec![("v", "int")],
+        };
+
+        let operations = std::iter::repeat(0..5).take(3).multi_cartesian_product().map(|x| {
+            format!("INSERT INTO RANGE_DELETE (pk1, pk2, ck1, ck2, ck3, v) VALUES (0, 0, {}, {}, {}, 0)", x[0], x[1], x[2])
+        }).collect::<Vec<_>>();
+
+        let mut operations: Vec<&str> = operations.iter().map(|x| x.as_str()).collect();
+
+        operations.append(&mut vec![
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND ck1 = 0 AND ck2 > -1 AND ck2 < 1",
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND ck1 = 1 AND ck2 < 2",
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2) < (3, 3) AND (ck1, ck2, ck3) > (2, 2, 2)",
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2, ck3) > (3, 3, 3)",
+        ]);
+
+        test_replication(&get_uri(), schema, operations)
+            .await
+            .unwrap();
+    }
 }
