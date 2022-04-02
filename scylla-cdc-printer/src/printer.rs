@@ -2,41 +2,42 @@ use std::cmp::max;
 use std::sync::Arc;
 
 use anyhow;
-use chrono::Duration;
-use core::time;
+use async_trait::async_trait;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
-use scylla::frame::response::result::Row;
 use scylla::Session;
+use std::time::Duration;
 
 use scylla_cdc::cdc_types::GenerationTimestamp;
-use scylla_cdc::reader::StreamReader;
+use scylla_cdc::consumer::{CDCRow, Consumer, ConsumerFactory};
 use scylla_cdc::stream_generations::GenerationFetcher;
+use scylla_cdc::stream_reader::StreamReader;
 
-pub struct CDCLogPrinter {
+pub struct CDCLogReader {
     // Tells the worker to stop
     // Usage of the "watch" channel will make it possible to change the the timestamp later,
     // for example if somebody loses patience and wants to stop now not later
-    end_timestamp: tokio::sync::watch::Sender<Duration>,
+    end_timestamp: tokio::sync::watch::Sender<chrono::Duration>,
 }
 
-impl CDCLogPrinter {
-    // Creates a printer and runs it immediately
+impl CDCLogReader {
+    // Creates a reader and runs it immediately
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        session: &Arc<Session>,
+        session: Arc<Session>,
         keyspace: String,
         table_name: String,
-        start_timestamp: Duration,
-        end_timestamp: Duration,
-        window_size: Duration,
-        safety_interval: Duration,
-        sleep_interval: time::Duration,
+        start_timestamp: chrono::Duration,
+        end_timestamp: chrono::Duration,
+        window_size: chrono::Duration,
+        safety_interval: chrono::Duration,
+        sleep_interval: Duration,
+        consumer_factory: Arc<dyn ConsumerFactory>,
     ) -> (Self, RemoteHandle<anyhow::Result<()>>) {
         let (end_timestamp_sender, end_timestamp_receiver) =
             tokio::sync::watch::channel(end_timestamp);
-        let mut worker = CDCLogPrinterWorker::new(
+        let mut worker = CDCReaderWorker::new(
             session,
             keyspace,
             table_name,
@@ -46,54 +47,57 @@ impl CDCLogPrinter {
             safety_interval,
             sleep_interval,
             end_timestamp_receiver,
+            consumer_factory,
         );
         let (fut, handle) = async move { worker.run().await }.remote_handle();
         tokio::task::spawn(fut);
-        let printer = CDCLogPrinter {
+        let printer = CDCLogReader {
             end_timestamp: end_timestamp_sender,
         };
         (printer, handle)
     }
 
     // Tell the worker to set the end timestamp and then stop
-    pub fn stop_at(&mut self, when: Duration) {
+    pub fn stop_at(&mut self, when: chrono::Duration) {
         let _ = self.end_timestamp.send(when);
     }
 
     // Tell the worker to stop immediately
     pub fn stop(&mut self) {
-        self.stop_at(Duration::min_value());
+        self.stop_at(chrono::Duration::min_value());
     }
 }
 
-struct CDCLogPrinterWorker {
+struct CDCReaderWorker {
     session: Arc<Session>,
     keyspace: String,
     table_name: String,
-    start_timestamp: Duration,
-    end_timestamp: Duration,
-    sleep_interval: time::Duration,
-    window_size: Duration,
-    safety_interval: Duration,
+    start_timestamp: chrono::Duration,
+    end_timestamp: chrono::Duration,
+    sleep_interval: Duration,
+    window_size: chrono::Duration,
+    safety_interval: chrono::Duration,
     readers: Vec<Arc<StreamReader>>,
-    end_timestamp_receiver: tokio::sync::watch::Receiver<Duration>,
+    end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
+    consumer_factory: Arc<dyn ConsumerFactory>,
 }
 
-impl CDCLogPrinterWorker {
+impl CDCReaderWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        session: &Arc<Session>,
+        session: Arc<Session>,
         keyspace: String,
         table_name: String,
-        start_timestamp: Duration,
-        end_timestamp: Duration,
-        window_size: Duration,
-        safety_interval: Duration,
-        sleep_interval: time::Duration,
-        end_timestamp_receiver: tokio::sync::watch::Receiver<Duration>,
-    ) -> CDCLogPrinterWorker {
-        CDCLogPrinterWorker {
-            session: Arc::clone(session),
+        start_timestamp: chrono::Duration,
+        end_timestamp: chrono::Duration,
+        window_size: chrono::Duration,
+        safety_interval: chrono::Duration,
+        sleep_interval: Duration,
+        end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
+        consumer_factory: Arc<dyn ConsumerFactory>,
+    ) -> CDCReaderWorker {
+        CDCReaderWorker {
+            session,
             keyspace,
             table_name,
             start_timestamp,
@@ -103,6 +107,7 @@ impl CDCLogPrinterWorker {
             sleep_interval,
             readers: vec![],
             end_timestamp_receiver,
+            consumer_factory,
         }
     }
 
@@ -112,10 +117,6 @@ impl CDCLogPrinterWorker {
             .clone()
             .fetch_generations_continuously(self.start_timestamp, self.sleep_interval)
             .await?;
-
-        fn print_row(row: Row) {
-            println!("{:?}", row.columns);
-        }
 
         let mut stream_reader_tasks = FuturesUnordered::new();
 
@@ -186,8 +187,10 @@ impl CDCLogPrinterWorker {
                             let reader = Arc::clone(reader);
                             let keyspace = self.keyspace.clone();
                             let table_name = self.table_name.clone();
+                            let factory = Arc::clone(&self.consumer_factory);
                             tokio::spawn(async move {
-                                reader.fetch_cdc(keyspace, table_name, print_row).await
+                                let consumer = factory.new_consumer().await;
+                                reader.fetch_cdc(keyspace, table_name, consumer).await
                             })
                         })
                         .collect();
@@ -201,19 +204,44 @@ impl CDCLogPrinterWorker {
         }
     }
 
-    async fn set_upper_timestamp(&self, new_upper_timestamp: Duration) {
+    async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
         for reader in self.readers.iter() {
             reader.set_upper_timestamp(new_upper_timestamp).await;
         }
     }
 }
 
+struct PrinterConsumer;
+
+#[async_trait]
+impl Consumer for PrinterConsumer {
+    async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
+        // [TODO]: Add prettier printing
+        println!(
+            "time: {}, batch_seq_no: {}, end_of_batch: {}, operation: {:?}, ttl: {:?}",
+            data.time, data.batch_seq_no, data.end_of_batch, data.operation, data.ttl
+        );
+        Ok(())
+    }
+}
+
+struct PrinterConsumerFactory;
+
+#[async_trait]
+impl ConsumerFactory for PrinterConsumerFactory {
+    async fn new_consumer(&self) -> Box<dyn Consumer> {
+        Box::new(PrinterConsumer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
 
     use scylla::batch::Consistency;
     use scylla::query::Query;
+    use scylla::Session;
     use scylla::SessionBuilder;
     use tokio::time::sleep;
 
@@ -279,13 +307,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_cdc_log_printer() {
-        let start = Duration::from_std(
+        let start = chrono::Duration::from_std(
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap(),
         )
         .unwrap();
-        let end = start + Duration::seconds(2);
+        let end = start + chrono::Duration::seconds(2);
 
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
         let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
@@ -301,18 +329,19 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut cdc_log_printer, _handle) = CDCLogPrinter::new(
-            &shared_session,
+        let (mut cdc_log_printer, _handle) = CDCLogReader::new(
+            shared_session,
             TEST_KEYSPACE.to_string(),
             TEST_TABLE.to_string(),
             start,
             end,
-            Duration::milliseconds(WINDOW_SIZE),
-            Duration::milliseconds(SAFETY_INTERVAL),
-            time::Duration::from_millis(SLEEP_INTERVAL as u64),
+            chrono::Duration::milliseconds(WINDOW_SIZE),
+            chrono::Duration::milliseconds(SAFETY_INTERVAL),
+            Duration::from_millis(SLEEP_INTERVAL as u64),
+            Arc::new(PrinterConsumerFactory),
         );
 
-        sleep(time::Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
         cdc_log_printer.stop();
     }

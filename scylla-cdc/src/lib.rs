@@ -1,7 +1,7 @@
 pub mod cdc_types;
 pub mod consumer;
-pub mod reader;
 pub mod stream_generations;
+pub mod stream_reader;
 
 #[cfg(test)]
 mod tests {
