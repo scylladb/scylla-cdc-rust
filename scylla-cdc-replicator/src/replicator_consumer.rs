@@ -13,10 +13,16 @@ use scylla::Session;
 
 use scylla_cdc::consumer::*;
 
-pub(crate) struct ReplicatorConsumer {
+struct DestinationTableParams {
     dest_session: Arc<Session>,
     dest_keyspace_name: String,
     dest_table_name: String,
+
+    // Strings for queries created dynamically:
+    keys_cond: String,
+}
+
+pub(crate) struct ReplicatorConsumer {
     table_schema: Table,
     non_key_columns: Vec<String>,
 
@@ -25,8 +31,7 @@ pub(crate) struct ReplicatorConsumer {
     partition_delete_query: PreparedStatement,
     delete_query: PreparedStatement,
 
-    // Strings for queries created dynamically:
-    keys_cond: String,
+    destination_table_params: DestinationTableParams,
 }
 
 impl ReplicatorConsumer {
@@ -83,16 +88,20 @@ impl ReplicatorConsumer {
             .await
             .expect("Preparing delete query failed.");
 
-        ReplicatorConsumer {
+        let destination_table_params = DestinationTableParams {
             dest_session,
             dest_keyspace_name,
             dest_table_name,
+            keys_cond,
+        };
+
+        ReplicatorConsumer {
             table_schema,
             non_key_columns,
             insert_query,
             partition_delete_query,
             delete_query,
-            keys_cond,
+            destination_table_params,
         }
     }
 
@@ -157,9 +166,9 @@ impl ReplicatorConsumer {
         self.run_statement(
             Query::new(format!(
                 "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                ks = self.dest_keyspace_name,
-                tbl = self.dest_table_name,
-                cond = self.keys_cond,
+                ks = self.destination_table_params.dest_keyspace_name,
+                tbl = self.destination_table_params.dest_table_name,
+                cond = self.destination_table_params.keys_cond,
                 cname = column_name,
             )),
             &values_for_update,
@@ -224,10 +233,10 @@ impl ReplicatorConsumer {
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
-                    ks = self.dest_keyspace_name,
-                    tbl = self.dest_table_name,
+                    ks = self.destination_table_params.dest_keyspace_name,
+                    tbl = self.destination_table_params.dest_table_name,
                     col = column_name,
-                    cond = self.keys_cond,
+                    cond = self.destination_table_params.keys_cond,
                 )),
                 pk_values,
                 timestamp,
@@ -239,10 +248,10 @@ impl ReplicatorConsumer {
         // In case of deleting, we simply set the value to null.
         let update_query = Query::new(format!(
             "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
-            ks = self.dest_keyspace_name,
-            tbl = self.dest_table_name,
+            ks = self.destination_table_params.dest_keyspace_name,
+            tbl = self.destination_table_params.dest_table_name,
             list = column_name,
-            cond = self.keys_cond
+            cond = self.destination_table_params.keys_cond
         ));
 
         if let Some(added_elements) = data.get_value(column_name) {
@@ -288,10 +297,10 @@ impl ReplicatorConsumer {
 
         let update_query = format!(
             "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
-            ks = self.dest_keyspace_name,
-            tbl = self.dest_table_name,
+            ks = self.destination_table_params.dest_keyspace_name,
+            tbl = self.destination_table_params.dest_table_name,
             cname = column_name,
-            cond = self.keys_cond,
+            cond = self.destination_table_params.keys_cond,
         );
 
         self.run_statement(Query::new(update_query), values_for_update, timestamp)
@@ -329,10 +338,10 @@ impl ReplicatorConsumer {
 
             let remove_query = format!(
                 "UPDATE {ks}.{tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
-                ks = self.dest_keyspace_name,
-                tbl = self.dest_table_name,
+                ks = self.destination_table_params.dest_keyspace_name,
+                tbl = self.destination_table_params.dest_table_name,
                 removed_fields = removed_fields,
-                cond = self.keys_cond,
+                cond = self.destination_table_params.keys_cond,
             );
 
             self.run_statement(Query::new(remove_query), values_for_update, timestamp)
@@ -407,7 +416,10 @@ impl ReplicatorConsumer {
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
-                    self.dest_keyspace_name, self.dest_table_name, column_name, self.keys_cond
+                    self.destination_table_params.dest_keyspace_name,
+                    self.destination_table_params.dest_table_name,
+                    column_name,
+                    self.destination_table_params.keys_cond
                 )),
                 values_for_update,
                 timestamp,
@@ -420,7 +432,10 @@ impl ReplicatorConsumer {
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {}.{} SET {} = NULL WHERE {}",
-                    self.dest_keyspace_name, self.dest_table_name, column_name, self.keys_cond
+                    self.destination_table_params.dest_keyspace_name,
+                    self.destination_table_params.dest_table_name,
+                    column_name,
+                    self.destination_table_params.keys_cond
                 )),
                 values_for_delete,
                 timestamp,
@@ -527,7 +542,10 @@ impl ReplicatorConsumer {
         timestamp: i64,
     ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
-        self.dest_session.execute(&query, values).await?;
+        self.destination_table_params
+            .dest_session
+            .execute(&query, values)
+            .await?;
 
         Ok(())
     }
@@ -539,7 +557,10 @@ impl ReplicatorConsumer {
         timestamp: i64,
     ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
-        self.dest_session.query(query, values).await?;
+        self.destination_table_params
+            .dest_session
+            .query(query, values)
+            .await?;
 
         Ok(())
     }
