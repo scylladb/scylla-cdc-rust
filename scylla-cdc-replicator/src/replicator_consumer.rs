@@ -22,6 +22,12 @@ struct DestinationTableParams {
     keys_cond: String,
 }
 
+struct PrecomputedQueries {
+    insert_query: PreparedStatement,
+    partition_delete_query: PreparedStatement,
+    delete_query: PreparedStatement,
+}
+
 struct SourceTableData {
     table_schema: Table,
     non_key_columns: Vec<String>,
@@ -29,12 +35,7 @@ struct SourceTableData {
 
 pub(crate) struct ReplicatorConsumer {
     source_table_data: SourceTableData,
-
-    // Prepared queries.
-    insert_query: PreparedStatement,
-    partition_delete_query: PreparedStatement,
-    delete_query: PreparedStatement,
-
+    precomputed_queries: PrecomputedQueries,
     destination_table_params: DestinationTableParams,
 }
 
@@ -96,7 +97,11 @@ impl ReplicatorConsumer {
             table_schema,
             non_key_columns,
         };
-
+        let precomputed_queries = PrecomputedQueries {
+            insert_query,
+            partition_delete_query,
+            delete_query,
+        };
         let destination_table_params = DestinationTableParams {
             dest_session,
             dest_keyspace_name,
@@ -106,9 +111,7 @@ impl ReplicatorConsumer {
 
         ReplicatorConsumer {
             source_table_data,
-            insert_query,
-            partition_delete_query,
-            delete_query,
+            precomputed_queries,
             destination_table_params,
         }
     }
@@ -132,8 +135,12 @@ impl ReplicatorConsumer {
             .map(|col_name| data.get_value(col_name).as_ref().unwrap())
             .collect::<Vec<&CqlValue>>();
 
-        self.run_prepared_statement(self.partition_delete_query.clone(), &values, timestamp)
-            .await?;
+        self.run_prepared_statement(
+            self.precomputed_queries.partition_delete_query.clone(),
+            &values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
@@ -403,8 +410,12 @@ impl ReplicatorConsumer {
     async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
 
-        self.run_prepared_statement(self.delete_query.clone(), &values, timestamp)
-            .await?;
+        self.run_prepared_statement(
+            self.precomputed_queries.delete_query.clone(),
+            &values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
@@ -463,8 +474,12 @@ impl ReplicatorConsumer {
             insert_values.extend(values.iter());
             insert_values.push(&ttl);
 
-            self.run_prepared_statement(self.insert_query.clone(), &insert_values, timestamp)
-                .await?;
+            self.run_prepared_statement(
+                self.precomputed_queries.insert_query.clone(),
+                &insert_values,
+                timestamp,
+            )
+            .await?;
         }
 
         let mut values_for_update = Vec::with_capacity(2 + values.len());
