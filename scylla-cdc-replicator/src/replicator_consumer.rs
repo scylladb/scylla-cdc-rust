@@ -22,9 +22,13 @@ struct DestinationTableParams {
     keys_cond: String,
 }
 
-pub(crate) struct ReplicatorConsumer {
+struct SourceTableData {
     table_schema: Table,
     non_key_columns: Vec<String>,
+}
+
+pub(crate) struct ReplicatorConsumer {
+    source_table_data: SourceTableData,
 
     // Prepared queries.
     insert_query: PreparedStatement,
@@ -88,6 +92,11 @@ impl ReplicatorConsumer {
             .await
             .expect("Preparing delete query failed.");
 
+        let source_table_data = SourceTableData {
+            table_schema,
+            non_key_columns,
+        };
+
         let destination_table_params = DestinationTableParams {
             dest_session,
             dest_keyspace_name,
@@ -96,8 +105,7 @@ impl ReplicatorConsumer {
         };
 
         ReplicatorConsumer {
-            table_schema,
-            non_key_columns,
+            source_table_data,
             insert_query,
             partition_delete_query,
             delete_query,
@@ -119,7 +127,7 @@ impl ReplicatorConsumer {
 
     async fn delete_partition(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let timestamp = ReplicatorConsumer::get_timestamp(&data);
-        let partition_keys_iter = self.table_schema.partition_key.iter();
+        let partition_keys_iter = self.source_table_data.table_schema.partition_key.iter();
         let values = partition_keys_iter
             .map(|col_name| data.get_value(col_name).as_ref().unwrap())
             .collect::<Vec<&CqlValue>>();
@@ -380,7 +388,7 @@ impl ReplicatorConsumer {
 
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
     fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
-        let keys_iter = ReplicatorConsumer::get_keys_iter(&self.table_schema);
+        let keys_iter = ReplicatorConsumer::get_keys_iter(&self.source_table_data.table_schema);
         let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
         let timestamp = ReplicatorConsumer::get_timestamp(data);
         let values = keys_iter
@@ -467,8 +475,15 @@ impl ReplicatorConsumer {
         values_for_list_update.extend([Some(&ttl), None, None]);
         values_for_list_update.extend(values.iter().map(|x| Some(*x)));
 
-        for column_name in &self.non_key_columns {
-            match &self.table_schema.columns.get(column_name).unwrap().type_ {
+        for column_name in &self.source_table_data.non_key_columns {
+            match &self
+                .source_table_data
+                .table_schema
+                .columns
+                .get(column_name)
+                .unwrap()
+                .type_
+            {
                 CqlType::Native(_)
                 | CqlType::Tuple(_)
                 | CqlType::Collection { frozen: true, .. }
