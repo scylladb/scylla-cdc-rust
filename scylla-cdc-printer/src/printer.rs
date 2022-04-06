@@ -8,7 +8,6 @@ use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::frame::response::result::Row;
 use scylla::Session;
-use tokio::task::JoinError;
 
 use scylla_cdc::cdc_types::GenerationTimestamp;
 use scylla_cdc::reader::StreamReader;
@@ -33,7 +32,7 @@ impl CDCLogPrinter {
         window_size: Duration,
         safety_interval: Duration,
         sleep_interval: time::Duration,
-    ) -> (Self, RemoteHandle<Result<anyhow::Result<()>, JoinError>>) {
+    ) -> (Self, RemoteHandle<anyhow::Result<()>>) {
         let (end_timestamp_sender, end_timestamp_receiver) =
             tokio::sync::watch::channel(end_timestamp);
         let mut worker = CDCLogPrinterWorker::new(
@@ -47,7 +46,8 @@ impl CDCLogPrinter {
             sleep_interval,
             end_timestamp_receiver,
         );
-        let (_, handle) = tokio::task::spawn(async move { worker.run().await }).remote_handle();
+        let (fut, handle) = async move { worker.run().await }.remote_handle();
+        tokio::task::spawn(fut);
         let printer = CDCLogPrinter {
             end_timestamp: end_timestamp_sender,
         };
