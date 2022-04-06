@@ -8,9 +8,9 @@ use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::frame::response::result::Row;
 use scylla::Session;
-use scylla_cdc::cdc_types::GenerationTimestamp;
 use tokio::task::JoinError;
 
+use scylla_cdc::cdc_types::GenerationTimestamp;
 use scylla_cdc::reader::StreamReader;
 use scylla_cdc::stream_generations::GenerationFetcher;
 
@@ -150,12 +150,11 @@ impl CDCLogPrinterWorker {
             }
 
             if stream_reader_tasks.is_empty() {
-                if err.is_some() {
-                    return Err(err.unwrap());
+                if let Some(err) = err {
+                    return Err(err);
                 }
 
-                if next_generation.is_some() {
-                    let generation = next_generation.unwrap();
+                if let Some(generation) = next_generation {
                     next_generation = None;
 
                     if generation.timestamp > self.end_timestamp {
