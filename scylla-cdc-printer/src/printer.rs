@@ -276,6 +276,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_cdc_log_printer() {
+        let start = Duration::from_std(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap(),
+        )
+        .unwrap();
+        let end = start + Duration::seconds(2);
+
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
         let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
         let shared_session = Arc::new(session);
@@ -290,13 +298,6 @@ mod tests {
             .await
             .unwrap();
 
-        let start: Duration = Duration::from_std(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap(),
-        )
-        .unwrap();
-        let end = start + Duration::seconds(2);
         let (mut cdc_log_printer, _handle) = CDCLogPrinter::new(
             &shared_session,
             TEST_KEYSPACE.to_string(),
@@ -308,7 +309,7 @@ mod tests {
             time::Duration::from_millis(SLEEP_INTERVAL as u64),
         );
 
-        sleep(time::Duration::from_secs(10)).await;
+        sleep(time::Duration::from_secs(2)).await;
 
         cdc_log_printer.stop();
     }
