@@ -4,13 +4,12 @@ use anyhow;
 use chrono::Duration;
 use core::time;
 use futures::future::RemoteHandle;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::frame::response::result::Row;
 use scylla::Session;
-use scylla_cdc::cdc_types::GenerationTimestamp;
-use tokio::task::JoinError;
 
+use scylla_cdc::cdc_types::GenerationTimestamp;
 use scylla_cdc::reader::StreamReader;
 use scylla_cdc::stream_generations::GenerationFetcher;
 
@@ -33,7 +32,7 @@ impl CDCLogPrinter {
         window_size: Duration,
         safety_interval: Duration,
         sleep_interval: time::Duration,
-    ) -> (Self, RemoteHandle<Result<anyhow::Result<()>, JoinError>>) {
+    ) -> (Self, RemoteHandle<anyhow::Result<()>>) {
         let (end_timestamp_sender, end_timestamp_receiver) =
             tokio::sync::watch::channel(end_timestamp);
         let mut worker = CDCLogPrinterWorker::new(
@@ -47,7 +46,8 @@ impl CDCLogPrinter {
             sleep_interval,
             end_timestamp_receiver,
         );
-        let (_, handle) = tokio::task::spawn(async move { worker.run().await }).remote_handle();
+        let (fut, handle) = async move { worker.run().await }.remote_handle();
+        tokio::task::spawn(fut);
         let printer = CDCLogPrinter {
             end_timestamp: end_timestamp_sender,
         };
@@ -124,7 +124,7 @@ impl CDCLogPrinterWorker {
 
         loop {
             tokio::select! {
-                evt = stream_reader_tasks.select_next_some() => {
+                Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated()  => {
                     match evt {
                         Err(error) => {
                             err = Some(anyhow::Error::new(error));
@@ -150,12 +150,11 @@ impl CDCLogPrinterWorker {
             }
 
             if stream_reader_tasks.is_empty() {
-                if err.is_some() {
-                    return Err(err.unwrap());
+                if let Some(err) = err {
+                    return Err(err);
                 }
 
-                if next_generation.is_some() {
-                    let generation = next_generation.unwrap();
+                if let Some(generation) = next_generation {
                     next_generation = None;
 
                     if generation.timestamp > self.end_timestamp {
@@ -179,8 +178,6 @@ impl CDCLogPrinterWorker {
                         })
                         .collect();
 
-                    self.set_upper_timestamp(generation.timestamp).await;
-
                     stream_reader_tasks = self
                         .readers
                         .iter()
@@ -194,6 +191,9 @@ impl CDCLogPrinterWorker {
                         })
                         .collect();
                 } else if had_first_generation {
+                    // FIXME: There may be another generation coming in the future with timestamp < end_timestamp
+                    // that could have been missed because of earlier fetching failures.
+                    // More on this here https://github.com/piodul/scylla-cdc-rust/pull/10#discussion_r826865162
                     return Ok(());
                 }
             }
@@ -278,6 +278,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_cdc_log_printer() {
+        let start = Duration::from_std(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap(),
+        )
+        .unwrap();
+        let end = start + Duration::seconds(2);
+
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
         let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
         let shared_session = Arc::new(session);
@@ -292,13 +300,6 @@ mod tests {
             .await
             .unwrap();
 
-        let start: Duration = Duration::from_std(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap(),
-        )
-        .unwrap();
-        let end = start + Duration::seconds(2);
         let (mut cdc_log_printer, _handle) = CDCLogPrinter::new(
             &shared_session,
             TEST_KEYSPACE.to_string(),
@@ -310,7 +311,7 @@ mod tests {
             time::Duration::from_millis(SLEEP_INTERVAL as u64),
         );
 
-        sleep(time::Duration::from_secs(10)).await;
+        sleep(time::Duration::from_secs(2)).await;
 
         cdc_log_printer.stop();
     }
