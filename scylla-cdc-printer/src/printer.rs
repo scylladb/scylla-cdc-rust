@@ -191,6 +191,9 @@ impl CDCLogPrinterWorker {
                         })
                         .collect();
                 } else if had_first_generation {
+                    // FIXME: There may be another generation coming in the future with timestamp < end_timestamp
+                    // that could have been missed because of earlier fetching failures.
+                    // More on this here https://github.com/piodul/scylla-cdc-rust/pull/10#discussion_r826865162
                     return Ok(());
                 }
             }
