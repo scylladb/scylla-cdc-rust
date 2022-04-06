@@ -4,7 +4,7 @@ use anyhow;
 use chrono::Duration;
 use core::time;
 use futures::future::RemoteHandle;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::frame::response::result::Row;
 use scylla::Session;
@@ -124,7 +124,7 @@ impl CDCLogPrinterWorker {
 
         loop {
             tokio::select! {
-                evt = stream_reader_tasks.select_next_some() => {
+                Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated()  => {
                     match evt {
                         Err(error) => {
                             err = Some(anyhow::Error::new(error));
