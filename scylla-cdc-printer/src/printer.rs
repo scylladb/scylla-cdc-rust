@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::sync::Arc;
 
 use anyhow;
@@ -170,7 +171,7 @@ impl CDCLogPrinterWorker {
                             Arc::new(StreamReader::new(
                                 &self.session,
                                 vec![stream_id.clone()],
-                                self.start_timestamp,
+                                max(self.start_timestamp, generation.timestamp),
                                 self.window_size,
                                 self.safety_interval,
                                 self.sleep_interval,
