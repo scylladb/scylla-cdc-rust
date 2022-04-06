@@ -179,8 +179,6 @@ impl CDCLogPrinterWorker {
                         })
                         .collect();
 
-                    self.set_upper_timestamp(generation.timestamp).await;
-
                     stream_reader_tasks = self
                         .readers
                         .iter()
