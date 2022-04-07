@@ -268,9 +268,9 @@ mod tests {
 
     use super::*;
 
-    const TEST_STREAM_TABLE: &str = "Test.cdc_streams_descriptions_v2";
-    const TEST_GENERATION_TABLE: &str = "Test.cdc_generation_timestamps";
-    const TEST_KEYSPACE: &str = "Test";
+    const TEST_STREAM_TABLE: &str = "stream_generations_test.cdc_streams_descriptions_v2";
+    const TEST_GENERATION_TABLE: &str = "stream_generations_test.cdc_generation_timestamps";
+    const TEST_KEYSPACE: &str = "stream_generations_test";
     const GENERATION_NEW_MILLISECONDS: i64 = 1635882326384;
     const GENERATION_OLD_MILLISECONDS: i64 = 1635882224341;
     const TEST_STREAM_1: &str = "0x7fb9f781956cea08c651295720000001";
