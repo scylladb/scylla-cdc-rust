@@ -1,5 +1,6 @@
 pub mod cdc_types;
 pub mod consumer;
+pub mod log_reader;
 pub mod stream_generations;
 pub mod stream_reader;
 
