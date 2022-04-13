@@ -23,40 +23,21 @@ struct DestinationTableParams {
 }
 
 struct PrecomputedQueries {
+    destination_table_params: DestinationTableParams,
     insert_query: PreparedStatement,
     partition_delete_query: PreparedStatement,
     delete_query: PreparedStatement,
 }
 
-struct SourceTableData {
-    table_schema: Table,
-    non_key_columns: Vec<String>,
-}
-
-pub(crate) struct ReplicatorConsumer {
-    source_table_data: SourceTableData,
-    precomputed_queries: PrecomputedQueries,
-    destination_table_params: DestinationTableParams,
-}
-
-impl ReplicatorConsumer {
-    pub(crate) async fn new(
+impl PrecomputedQueries {
+    async fn new(
         dest_session: Arc<Session>,
         dest_keyspace_name: String,
         dest_table_name: String,
-        table_schema: Table,
-    ) -> ReplicatorConsumer {
+        table_schema: &Table,
+    ) -> anyhow::Result<PrecomputedQueries> {
         // Iterator for both: partition keys and clustering keys.
-        let keys_iter = ReplicatorConsumer::get_keys_iter(&table_schema);
-        // Collect names of columns that are not clustering or partition key.
-        let non_key_columns = table_schema
-            .columns
-            .iter()
-            .filter(|column| {
-                column.1.kind != ColumnKind::Clustering && column.1.kind != ColumnKind::PartitionKey
-            })
-            .map(|column| column.0.clone())
-            .collect::<Vec<String>>();
+        let keys_iter = get_keys_iter(table_schema);
 
         // Clone, because the iterator is consumed.
         let names = keys_iter.clone().join(",");
@@ -71,7 +52,7 @@ impl ReplicatorConsumer {
             .expect("Preparing insert query failed.");
 
         let keys_cond = keys_iter.map(|name| format!("{} = ?", name)).join(" AND ");
-        let partition_keys_cond = table_schema
+        let partition_keys_cond = &table_schema
             .partition_key
             .iter()
             .map(|name| format!("{} = ?", name))
@@ -93,15 +74,6 @@ impl ReplicatorConsumer {
             .await
             .expect("Preparing delete query failed.");
 
-        let source_table_data = SourceTableData {
-            table_schema,
-            non_key_columns,
-        };
-        let precomputed_queries = PrecomputedQueries {
-            insert_query,
-            partition_delete_query,
-            delete_query,
-        };
         let destination_table_params = DestinationTableParams {
             dest_session,
             dest_keyspace_name,
@@ -109,18 +81,60 @@ impl ReplicatorConsumer {
             keys_cond,
         };
 
+        Ok(PrecomputedQueries {
+            destination_table_params,
+            insert_query,
+            partition_delete_query,
+            delete_query,
+        })
+    }
+}
+
+struct SourceTableData {
+    table_schema: Table,
+    non_key_columns: Vec<String>,
+}
+
+pub(crate) struct ReplicatorConsumer {
+    source_table_data: SourceTableData,
+    precomputed_queries: PrecomputedQueries,
+}
+
+impl ReplicatorConsumer {
+    pub(crate) async fn new(
+        dest_session: Arc<Session>,
+        dest_keyspace_name: String,
+        dest_table_name: String,
+        table_schema: Table,
+    ) -> ReplicatorConsumer {
+        // Collect names of columns that are not clustering or partition key.
+        let non_key_columns = table_schema
+            .columns
+            .iter()
+            .filter(|column| {
+                column.1.kind != ColumnKind::Clustering && column.1.kind != ColumnKind::PartitionKey
+            })
+            .map(|column| column.0.clone())
+            .collect::<Vec<String>>();
+
+        let precomputed_queries = PrecomputedQueries::new(
+            dest_session,
+            dest_keyspace_name,
+            dest_table_name,
+            &table_schema,
+        )
+        .await
+        .expect("Preparing precomputed queries failed.");
+
+        let source_table_data = SourceTableData {
+            table_schema,
+            non_key_columns,
+        };
+
         ReplicatorConsumer {
             source_table_data,
             precomputed_queries,
-            destination_table_params,
         }
-    }
-
-    fn get_keys_iter(table_schema: &Table) -> impl std::iter::Iterator<Item = &String> + Clone {
-        table_schema
-            .partition_key
-            .iter()
-            .chain(table_schema.clustering_key.iter())
     }
 
     fn get_timestamp(data: &CDCRow<'_>) -> i64 {
@@ -181,9 +195,9 @@ impl ReplicatorConsumer {
         self.run_statement(
             Query::new(format!(
                 "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                ks = self.destination_table_params.dest_keyspace_name,
-                tbl = self.destination_table_params.dest_table_name,
-                cond = self.destination_table_params.keys_cond,
+                ks = self.precomputed_queries.destination_table_params.dest_keyspace_name,
+                tbl = self.precomputed_queries.destination_table_params.dest_table_name,
+                cond = self.precomputed_queries.destination_table_params.keys_cond,
                 cname = column_name,
             )),
             &values_for_update,
@@ -248,10 +262,16 @@ impl ReplicatorConsumer {
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
-                    ks = self.destination_table_params.dest_keyspace_name,
-                    tbl = self.destination_table_params.dest_table_name,
+                    ks = self
+                        .precomputed_queries
+                        .destination_table_params
+                        .dest_keyspace_name,
+                    tbl = self
+                        .precomputed_queries
+                        .destination_table_params
+                        .dest_table_name,
                     col = column_name,
-                    cond = self.destination_table_params.keys_cond,
+                    cond = self.precomputed_queries.destination_table_params.keys_cond,
                 )),
                 pk_values,
                 timestamp,
@@ -263,10 +283,10 @@ impl ReplicatorConsumer {
         // In case of deleting, we simply set the value to null.
         let update_query = Query::new(format!(
             "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
-            ks = self.destination_table_params.dest_keyspace_name,
-            tbl = self.destination_table_params.dest_table_name,
+            ks = self.precomputed_queries.destination_table_params.dest_keyspace_name,
+            tbl = self.precomputed_queries.destination_table_params.dest_table_name,
             list = column_name,
-            cond = self.destination_table_params.keys_cond
+            cond = self.precomputed_queries.destination_table_params.keys_cond
         ));
 
         if let Some(added_elements) = data.get_value(column_name) {
@@ -312,10 +332,16 @@ impl ReplicatorConsumer {
 
         let update_query = format!(
             "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
-            ks = self.destination_table_params.dest_keyspace_name,
-            tbl = self.destination_table_params.dest_table_name,
+            ks = self
+                .precomputed_queries
+                .destination_table_params
+                .dest_keyspace_name,
+            tbl = self
+                .precomputed_queries
+                .destination_table_params
+                .dest_table_name,
             cname = column_name,
-            cond = self.destination_table_params.keys_cond,
+            cond = self.precomputed_queries.destination_table_params.keys_cond,
         );
 
         self.run_statement(Query::new(update_query), values_for_update, timestamp)
@@ -353,10 +379,16 @@ impl ReplicatorConsumer {
 
             let remove_query = format!(
                 "UPDATE {ks}.{tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
-                ks = self.destination_table_params.dest_keyspace_name,
-                tbl = self.destination_table_params.dest_table_name,
+                ks = self
+                    .precomputed_queries
+                    .destination_table_params
+                    .dest_keyspace_name,
+                tbl = self
+                    .precomputed_queries
+                    .destination_table_params
+                    .dest_table_name,
                 removed_fields = removed_fields,
-                cond = self.destination_table_params.keys_cond,
+                cond = self.precomputed_queries.destination_table_params.keys_cond,
             );
 
             self.run_statement(Query::new(remove_query), values_for_update, timestamp)
@@ -395,7 +427,7 @@ impl ReplicatorConsumer {
 
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
     fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
-        let keys_iter = ReplicatorConsumer::get_keys_iter(&self.source_table_data.table_schema);
+        let keys_iter = get_keys_iter(&self.source_table_data.table_schema);
         let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
         let timestamp = ReplicatorConsumer::get_timestamp(data);
         let values = keys_iter
@@ -435,10 +467,14 @@ impl ReplicatorConsumer {
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
-                    self.destination_table_params.dest_keyspace_name,
-                    self.destination_table_params.dest_table_name,
+                    self.precomputed_queries
+                        .destination_table_params
+                        .dest_keyspace_name,
+                    self.precomputed_queries
+                        .destination_table_params
+                        .dest_table_name,
                     column_name,
-                    self.destination_table_params.keys_cond
+                    self.precomputed_queries.destination_table_params.keys_cond
                 )),
                 values_for_update,
                 timestamp,
@@ -451,10 +487,14 @@ impl ReplicatorConsumer {
             self.run_statement(
                 Query::new(format!(
                     "UPDATE {}.{} SET {} = NULL WHERE {}",
-                    self.destination_table_params.dest_keyspace_name,
-                    self.destination_table_params.dest_table_name,
+                    self.precomputed_queries
+                        .destination_table_params
+                        .dest_keyspace_name,
+                    self.precomputed_queries
+                        .destination_table_params
+                        .dest_table_name,
                     column_name,
-                    self.destination_table_params.keys_cond
+                    self.precomputed_queries.destination_table_params.keys_cond
                 )),
                 values_for_delete,
                 timestamp,
@@ -572,7 +612,8 @@ impl ReplicatorConsumer {
         timestamp: i64,
     ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
-        self.destination_table_params
+        self.precomputed_queries
+            .destination_table_params
             .dest_session
             .execute(&query, values)
             .await?;
@@ -587,13 +628,21 @@ impl ReplicatorConsumer {
         timestamp: i64,
     ) -> anyhow::Result<()> {
         query.set_timestamp(Some(timestamp));
-        self.destination_table_params
+        self.precomputed_queries
+            .destination_table_params
             .dest_session
             .query(query, values)
             .await?;
 
         Ok(())
     }
+}
+
+fn get_keys_iter(table_schema: &Table) -> impl std::iter::Iterator<Item = &String> + Clone {
+    table_schema
+        .partition_key
+        .iter()
+        .chain(table_schema.clustering_key.iter())
 }
 
 #[async_trait]
