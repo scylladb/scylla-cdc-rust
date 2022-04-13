@@ -6,12 +6,12 @@ use scylla::frame::response::result::{ColumnSpec, CqlValue, Row};
 use std::collections::HashMap;
 
 #[async_trait]
-pub trait Consumer {
+pub trait Consumer: Send {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()>;
 }
 
 #[async_trait]
-pub trait ConsumerFactory {
+pub trait ConsumerFactory: Sync + Send {
     async fn new_consumer(&self) -> Box<dyn Consumer>;
 }
 

@@ -4,12 +4,12 @@ use std::time;
 
 use chrono;
 use futures::StreamExt;
-use scylla::frame::response::result::Row;
 use scylla::frame::value::Timestamp;
 use scylla::Session;
 use tokio::time::sleep;
 
 use crate::cdc_types::StreamID;
+use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 
 pub struct StreamReader {
     session: Arc<Session>,
@@ -50,7 +50,7 @@ impl StreamReader {
         &self,
         keyspace: String,
         table_name: String,
-        mut after_fetch_callback: impl FnMut(Row),
+        mut consumer: Box<dyn Consumer>,
     ) -> anyhow::Result<()> {
         let query = format!(
             "SELECT * FROM {}.{}_scylla_cdc_log \
@@ -85,8 +85,12 @@ impl StreamReader {
                 )
                 .await?;
 
+            let schema = CDCRowSchema::new(rows_stream.get_column_specs());
+
             while let Some(row) = rows_stream.next().await {
-                after_fetch_callback(row?);
+                consumer
+                    .consume_cdc(CDCRow::from_row(row?, &schema))
+                    .await?;
             }
 
             if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref() {
@@ -105,16 +109,18 @@ impl StreamReader {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use futures::stream::StreamExt;
     use scylla::batch::Consistency;
     use scylla::query::Query;
     use scylla::SessionBuilder;
+    use tokio::sync::Mutex;
 
     use super::*;
 
     const SECOND_IN_MICRO: i64 = 1_000_000;
     const SECOND_IN_MILLIS: i64 = 1_000;
-    const TEST_KEYSPACE: &str = "test";
+    const TEST_KEYSPACE: &str = "stream_reader_test";
     const TEST_TABLE: &str = "t";
     const SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
     const WINDOW_SIZE: i64 = SECOND_IN_MILLIS / 10 * 3;
@@ -237,9 +243,33 @@ mod tests {
         Ok(stream_ids_vec)
     }
 
+    fn get_uri() -> String {
+        std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
+    }
+
+    type TestResult = (i32, String, i32, String);
+
+    struct FetchTestConsumer {
+        fetched_rows: Arc<Mutex<Vec<TestResult>>>,
+    }
+
+    #[async_trait]
+    impl Consumer for FetchTestConsumer {
+        async fn consume_cdc(&mut self, mut data: CDCRow<'_>) -> anyhow::Result<()> {
+            let new_val = (
+                data.take_value("pk").unwrap().as_int().unwrap(),
+                data.take_value("s").unwrap().as_text().unwrap().to_string(),
+                data.take_value("t").unwrap().as_int().unwrap(),
+                data.take_value("v").unwrap().as_text().unwrap().to_string(),
+            );
+            self.fetched_rows.lock().await.push(new_val);
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn check_fetch_cdc_with_multiple_stream_id() {
-        let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+        let uri = get_uri();
         let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
         let shared_session = Arc::new(session);
 
@@ -260,15 +290,13 @@ mod tests {
                 chrono::Local::now().timestamp_millis() + to_set_upper_timestamp,
             ))
             .await;
-        let mut fetched_results: Vec<Row> = Vec::new();
-        let fetch_callback = |row: Row| fetched_results.push(row);
+        let fetched_rows = Arc::new(Mutex::new(vec![]));
+        let consumer = Box::new(FetchTestConsumer {
+            fetched_rows: Arc::clone(&fetched_rows),
+        });
 
         cdc_reader
-            .fetch_cdc(
-                TEST_KEYSPACE.to_string(),
-                TEST_TABLE.to_string(),
-                fetch_callback,
-            )
+            .fetch_cdc(TEST_KEYSPACE.to_string(), TEST_TABLE.to_string(), consumer)
             .await
             .unwrap();
 
@@ -277,11 +305,8 @@ mod tests {
         let mut count1 = 0;
         let mut count2 = 0;
 
-        for row in fetched_results.into_iter() {
-            let pk = row.columns[8].as_ref().unwrap().as_int().unwrap();
-            let s = row.columns[9].as_ref().unwrap().as_text().unwrap();
-            let t = row.columns[10].as_ref().unwrap().as_int().unwrap();
-            let v = row.columns[11].as_ref().unwrap().as_text().unwrap();
+        for row in fetched_rows.lock().await.iter() {
+            let (pk, s, t, v) = row.clone();
 
             if pk == partition_key_1 as i32 {
                 assert_eq!(pk, partition_key_1 as i32);
@@ -306,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_one_stream_id() {
-        let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+        let uri = get_uri();
         let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
         let shared_session = Arc::new(session);
 
@@ -323,25 +348,18 @@ mod tests {
                 chrono::Local::now().timestamp_millis() + to_set_upper_timestamp,
             ))
             .await;
-        let mut fetched_results: Vec<Row> = Vec::new();
-        let fetch_callback = |row: Row| {
-            fetched_results.push(row);
-        };
+        let fetched_rows = Arc::new(Mutex::new(vec![]));
+        let consumer = Box::new(FetchTestConsumer {
+            fetched_rows: Arc::clone(&fetched_rows),
+        });
 
         cdc_reader
-            .fetch_cdc(
-                TEST_KEYSPACE.to_string(),
-                TEST_TABLE.to_string(),
-                fetch_callback,
-            )
+            .fetch_cdc(TEST_KEYSPACE.to_string(), TEST_TABLE.to_string(), consumer)
             .await
             .unwrap();
 
-        for (count, row) in fetched_results.into_iter().enumerate() {
-            let pk = row.columns[8].as_ref().unwrap().as_int().unwrap();
-            let s = row.columns[9].as_ref().unwrap().as_text().unwrap();
-            let t = row.columns[10].as_ref().unwrap().as_int().unwrap();
-            let v = row.columns[11].as_ref().unwrap().as_text().unwrap();
+        for (count, row) in fetched_rows.lock().await.iter().enumerate() {
+            let (pk, s, t, v) = row.clone();
             assert_eq!(pk, partition_key as i32);
             assert_eq!(t, count as i32);
             assert_eq!(v.to_string(), format!("val{}", count));
@@ -351,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_set_upper_timestamp_in_fetch_cdc() {
-        let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+        let uri = get_uri();
         let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
         let shared_session = Arc::new(session);
 
@@ -387,26 +405,18 @@ mod tests {
             .query(insert_after_upper_timestamp_query, ())
             .await
             .unwrap();
-
-        let mut fetched_results: Vec<Row> = Vec::new();
-        let fetch_callback = |row: Row| {
-            fetched_results.push(row);
-        };
+        let fetched_rows = Arc::new(Mutex::new(vec![]));
+        let consumer = Box::new(FetchTestConsumer {
+            fetched_rows: Arc::clone(&fetched_rows),
+        });
 
         cdc_reader
-            .fetch_cdc(
-                TEST_KEYSPACE.to_string(),
-                TEST_TABLE.to_string(),
-                fetch_callback,
-            )
+            .fetch_cdc(TEST_KEYSPACE.to_string(), TEST_TABLE.to_string(), consumer)
             .await
             .unwrap();
 
-        for row in fetched_results {
-            let pk = row.columns[8].as_ref().unwrap().as_int().unwrap();
-            let s = row.columns[9].as_ref().unwrap().as_text().unwrap();
-            let t = row.columns[10].as_ref().unwrap().as_int().unwrap();
-            let v = row.columns[11].as_ref().unwrap().as_text().unwrap();
+        for row in fetched_rows.lock().await.iter() {
+            let (pk, s, t, v) = row.clone();
             assert_eq!(pk, 0);
             assert_eq!(t, 0);
             assert_eq!(v.to_string(), "val0".to_string());
