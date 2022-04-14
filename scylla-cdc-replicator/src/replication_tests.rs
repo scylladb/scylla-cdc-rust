@@ -4,9 +4,7 @@ mod tests {
     use anyhow::anyhow;
     use futures_util::FutureExt;
     use itertools::Itertools;
-    use scylla::frame::response::result::CqlValue::{
-        Boolean, Int, List, Map, Set, Text, Tuple, UserDefinedType,
-    };
+    use scylla::frame::response::result::CqlValue::{Boolean, Int, Text, UserDefinedType};
     use scylla::frame::response::result::{CqlValue, Row};
     use scylla::{Session, SessionBuilder};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
@@ -32,7 +30,7 @@ mod tests {
     /// Tuple representing an operation to be performed on the table before replicating.
     /// The string is the CQL query with the operation. Keyspace does not have to be specified.
     /// The vector of values are the values that will be bound to the query.
-    pub type TestOperation<'a> = (&'a str, Vec<CqlValue>);
+    pub type TestOperation<'a> = &'a str;
 
     enum FailureReason {
         WrongRowsCount(usize, usize),
@@ -137,7 +135,7 @@ mod tests {
     ) -> anyhow::Result<()> {
         session.use_keyspace("test_src", false).await?;
         for operation in operations {
-            session.query(operation.0, operation.1).await?;
+            session.query(operation, []).await?;
         }
 
         Ok(())
@@ -490,14 +488,8 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (1, 2, 3, true)",
-                vec![],
-            ),
-            (
-                "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (3, 2, 1, false)",
-                vec![],
-            ),
+            "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (1, 2, 3, true)",
+            "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (3, 2, 1, false)",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -515,18 +507,9 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO SIMPLE_UPDATE (pk, ck, v1, v2) VALUES (1, 2, 3, true)",
-                vec![],
-            ),
-            (
-                "UPDATE SIMPLE_UPDATE SET v2 = false WHERE pk = 1 AND ck = 2",
-                vec![],
-            ),
-            (
-                "DELETE v1 FROM SIMPLE_UPDATE WHERE pk = 1 AND ck = 2",
-                vec![],
-            ),
+            "INSERT INTO SIMPLE_UPDATE (pk, ck, v1, v2) VALUES (1, 2, 3, true)",
+            "UPDATE SIMPLE_UPDATE SET v2 = false WHERE pk = 1 AND ck = 2",
+            "DELETE v1 FROM SIMPLE_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -549,25 +532,8 @@ mod tests {
         }];
 
         let operations = vec![
-            (
-                "INSERT INTO SIMPLE_UDT_TEST (pk, ck, ut_col) VALUES (?, ?, ?)",
-                vec![
-                    Int(0),
-                    Int(0),
-                    CqlValue::UserDefinedType {
-                        keyspace: "test_src".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(1))),
-                            ("bool_val".to_string(), Some(Boolean(true))),
-                        ],
-                    },
-                ],
-            ),
-            (
-                "UPDATE SIMPLE_UDT_TEST SET ut_col = null WHERE pk = 0 AND ck = 0",
-                vec![],
-            ),
+            "INSERT INTO SIMPLE_UDT_TEST (pk, ck, ut_col) VALUES (0, 0, {int_val: 1, bool_val: true})",
+            "UPDATE SIMPLE_UDT_TEST SET ut_col = null WHERE pk = 0 AND ck = 0",
         ];
 
         test_replication_with_udt(&get_uri(), table_schema, udt_schemas, operations)
@@ -585,36 +551,10 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(0), Int(1), Map(vec![]), Map(vec![])],
-            ),
-            (
-                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(1), Int(2), Map(vec![(Int(1), Int(1))]), Map(vec![])],
-            ),
-            (
-                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![
-                    Int(3),
-                    Int(4),
-                    Map(vec![]),
-                    Map(vec![(Int(10), Boolean(true))]),
-                ],
-            ),
-            (
-                "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![
-                    Int(5),
-                    Int(6),
-                    Map(vec![
-                        (Int(100), Int(100)),
-                        (Int(200), Int(200)),
-                        (Int(300), Int(300)),
-                    ]),
-                    Map(vec![(Int(400), Boolean(true)), (Int(500), Boolean(false))]),
-                ],
-            ),
+            "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (0, 1, {}, {})",
+            "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (1, 2, {1: 1}, {})",
+            "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (3, 4, {}, {10: true})",
+            "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (5, 6, {100: 100, 200: 200, 300: 300}, {400: true, 500: false})",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -632,23 +572,9 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO MAPS_UPDATE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![
-                    Int(1),
-                    Int(2),
-                    Map(vec![(Int(1), Int(1)), (Int(2), Int(2))]),
-                    Map(vec![(Int(1), Boolean(true))]),
-                ],
-            ),
-            (
-                "UPDATE MAPS_UPDATE SET v2 = ? WHERE pk = ? AND ck = ?",
-                vec![Map(vec![(Int(2), Boolean(true))]), Int(10), Int(20)],
-            ),
-            (
-                "DELETE v1 FROM MAPS_UPDATE WHERE pk = ? AND ck = ?",
-                vec![Int(1), Int(2)],
-            ),
+            "INSERT INTO MAPS_UPDATE (pk, ck, v1, v2) VALUES (1, 2, {1: 1, 2: 2}, {1: true})",
+            "UPDATE MAPS_UPDATE SET v2 = {2: true} WHERE pk = 10 AND ck = 20",
+            "DELETE v1 FROM MAPS_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -666,48 +592,11 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO MAP_ELEMENTS_UPDATE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![
-                    Int(1),
-                    Int(2),
-                    Map(vec![(Int(1), Int(-1))]),
-                    Map(vec![(Int(2), Boolean(false))]),
-                ],
-            ),
-            (
-                "INSERT INTO MAP_ELEMENTS_UPDATE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![
-                    Int(10),
-                    Int(20),
-                    Map(vec![(Int(10), Int(-10))]),
-                    Map(vec![(Int(11), Boolean(false))]),
-                ],
-            ),
-            (
-                "UPDATE MAP_ELEMENTS_UPDATE SET v2 = v2 + ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Map(vec![
-                        (Int(-21374134), Boolean(true)),
-                        (Int(-43142137), Boolean(false)),
-                    ]),
-                    Int(1),
-                    Int(2),
-                ],
-            ),
-            (
-                "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(10)]), Int(10), Int(20)],
-            ),
-            (
-                "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - ?, v1 = v1 + ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Set(vec![Int(1)]),
-                    Map(vec![(Int(2137), Int(-2137))]),
-                    Int(1),
-                    Int(2),
-                ],
-            ),
+            "INSERT INTO MAP_ELEMENTS_UPDATE (pk, ck, v1, v2) VALUES (1, 2, {1: -1}, {2: false})",
+            "INSERT INTO MAP_ELEMENTS_UPDATE (pk, ck, v1, v2) VALUES (10, 20, {10: -10}, {11: false})",
+            "UPDATE MAP_ELEMENTS_UPDATE SET v2 = v2 + {-21374134: true, -43142137: false} WHERE pk = 1 AND ck = 2",
+            "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {10} WHERE pk = 10 AND ck = 20",
+            "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {1}, v1 = v1 + {2137: -2137} WHERE pk = 1 AND ck = 2",
         ];
         test_replication(&get_uri(), schema, operations)
             .await
@@ -724,30 +613,12 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(1), Int(2), Int(3), Boolean(true)],
-            ),
-            (
-                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(10), Int(20), Int(30), Boolean(true)],
-            ),
-            (
-                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(100), Int(200), Int(300), Boolean(true)],
-            ),
-            (
-                "DELETE FROM ROW_DELETE WHERE pk = ? AND ck = ?",
-                vec![Int(1), Int(2)],
-            ),
-            (
-                "DELETE FROM ROW_DELETE WHERE pk = ? AND ck = ?",
-                vec![Int(-1), Int(-2)],
-            ),
-            (
-                "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(-1), Int(-2), Int(30), Boolean(true)],
-            ),
+            "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (1, 2, 3, true)",
+            "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (10, 20, 30, true)",
+            "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (100, 200, 300, true)",
+            "DELETE FROM ROW_DELETE WHERE pk = 1 AND ck = 2",
+            "DELETE FROM ROW_DELETE WHERE pk = -1 AND ck = -2",
+            "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (-1, -2, 30, true)",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -765,18 +636,9 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(0), Int(1), Set(vec![])],
-            ),
-            (
-                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(1), Int(2), Set(vec![Int(1), Int(2)])],
-            ),
-            (
-                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(3), Int(4), Set(vec![Int(1), Int(1)])],
-            ),
+            "INSERT INTO SET_TEST (pk, ck, v) VALUES (0, 1, {})",
+            "INSERT INTO SET_TEST (pk, ck, v) VALUES (1, 2, {1, 2})",
+            "INSERT INTO SET_TEST (pk, ck, v) VALUES (3, 4, {1, 1})",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -794,14 +656,8 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "UPDATE SET_TEST SET v = ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(-1), Int(-2)]), Int(0), Int(1)],
-            ),
-            (
-                "UPDATE SET_TEST SET v = ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(1), Int(2)]), Int(0), Int(1)],
-            ),
+            "UPDATE SET_TEST SET v = {-1, -2} WHERE pk = 0 AND ck = 1",
+            "UPDATE SET_TEST SET v = {1, 2} WHERE pk = 0 AND ck = 1",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -819,14 +675,8 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO SET_TEST (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(0), Int(1), Set(vec![Int(0), Int(1)])],
-            ),
-            (
-                "DELETE v FROM SET_TEST WHERE pk = ? AND ck = ?",
-                vec![Int(0), Int(1)],
-            ),
+            "INSERT INTO SET_TEST (pk, ck, v) VALUES (0, 1, {0, 1})",
+            "DELETE v FROM SET_TEST WHERE pk = 0 AND ck = 1",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -844,22 +694,10 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "UPDATE SET_TEST SET v = ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(1), Int(2)]), Int(0), Int(1)],
-            ),
-            (
-                "UPDATE SET_TEST SET v = v - ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(1)]), Int(0), Int(1)],
-            ),
-            (
-                "UPDATE SET_TEST SET v = v + ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(10), Int(20)]), Int(0), Int(1)],
-            ),
-            (
-                "UPDATE SET_TEST SET v = v - ?, v = v + ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Int(10)]), Set(vec![Int(200)]), Int(0), Int(1)],
-            ),
+            "UPDATE SET_TEST SET v = {1, 2} WHERE pk = 0 AND ck = 1",
+            "UPDATE SET_TEST SET v = v - {1} WHERE pk = 0 AND ck = 1",
+            "UPDATE SET_TEST SET v = v + {10, 20} WHERE pk = 0 AND ck = 1",
+            "UPDATE SET_TEST SET v = v - {10}, v = v + {200} WHERE pk = 0 AND ck = 1",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -877,15 +715,9 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO PARTITION_DELETE (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(0), Int(0), Int(0)],
-            ),
-            (
-                "INSERT INTO PARTITION_DELETE (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(0), Int(1), Int(1)],
-            ),
-            ("DELETE FROM PARTITION_DELETE WHERE pk = ?", vec![Int(0)]),
+            "INSERT INTO PARTITION_DELETE (pk, ck, v) VALUES (0, 0, 0)",
+            "INSERT INTO PARTITION_DELETE (pk, ck, v) VALUES (0, 1, 1)",
+            "DELETE FROM PARTITION_DELETE WHERE pk = 0",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -908,51 +740,9 @@ mod tests {
         }];
 
         let operations = vec![
-            (
-                "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (?, ?, ?)",
-                vec![
-                    Int(0),
-                    Int(1),
-                    CqlValue::UserDefinedType {
-                        keyspace: "".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(1))),
-                            ("bool_val".to_string(), Some(Boolean(true))),
-                        ],
-                    },
-                ],
-            ),
-            (
-                "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (?, ?, ?)",
-                vec![
-                    Int(1),
-                    Int(2),
-                    CqlValue::UserDefinedType {
-                        keyspace: "".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(2))),
-                            ("bool_val".to_string(), Some(Boolean(false))),
-                        ],
-                    },
-                ],
-            ),
-            (
-                "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (?, ?, ?)",
-                vec![
-                    Int(3),
-                    Int(4),
-                    CqlValue::UserDefinedType {
-                        keyspace: "".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(3))),
-                            ("bool_val".to_string(), Some(Boolean(true))),
-                        ],
-                    },
-                ],
-            ),
+            "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (0, 1, {int_val: 1, bool_val: true})",
+            "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (1, 2, {int_val: 2, bool_val: false})",
+            "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (3, 4, {int_val: 3, bool_val: true})",
         ];
 
         test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
@@ -970,18 +760,9 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO PARTITION_DELETE_MULT_PK (pk1, pk2, ck, v1, v2) VALUES (?, ?, ?, ?, ?)",
-                vec![Int(0), Int(1), Int(0), Int(0), Boolean(true)],
-            ),
-            (
-                "INSERT INTO PARTITION_DELETE_MULT_PK (pk1, pk2, ck, v1, v2) VALUES (?, ?, ?, ?, ?)",
-                vec![Int(0), Int(2), Int(1), Int(1), Boolean(false)],
-            ),
-            (
-                "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = ? AND pk2 = ?",
-                vec![Int(0), Int(2)]
-            ),
+            "INSERT INTO PARTITION_DELETE_MULT_PK (pk1, pk2, ck, v1, v2) VALUES (0, 1, 0, 0, true)",
+            "INSERT INTO PARTITION_DELETE_MULT_PK (pk1, pk2, ck, v1, v2) VALUES (0, 2, 1, 1, false)",
+            "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = 0 AND pk2 = 2",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -999,18 +780,9 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO LIST_ELEMENTS_UPDATE (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(1), Int(2), List(vec![Int(0), Int(1), Int(1), Int(2)])],
-            ),
-            (
-                "UPDATE LIST_ELEMENTS_UPDATE SET v = v + ? WHERE pk = ? AND ck = ?",
-                vec![List(vec![Int(3), Int(5), Int(8), Int(13)]), Int(1), Int(2)],
-            ),
-            (
-                "UPDATE LIST_ELEMENTS_UPDATE SET v = v - ? WHERE pk = ? AND ck = ?",
-                vec![List(vec![Int(1), Int(5)]), Int(1), Int(2)],
-            ),
+            "INSERT INTO LIST_ELEMENTS_UPDATE (pk, ck, v) VALUES (1, 2, [0, 1, 1, 2])",
+            "UPDATE LIST_ELEMENTS_UPDATE SET v = v + [3, 5, 8, 13] WHERE pk = 1 AND ck = 2",
+            "UPDATE LIST_ELEMENTS_UPDATE SET v = v - [1, 5] WHERE pk = 1 AND ck = 2",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -1033,40 +805,9 @@ mod tests {
         }];
 
         let operations = vec![
-            (
-                "INSERT INTO TEST_UDT_UPDATE (pk, ck, v) VALUES (?, ?, ?)",
-                vec![
-                    Int(0),
-                    Int(1),
-                    CqlValue::UserDefinedType {
-                        keyspace: "".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(1))),
-                            ("bool_val".to_string(), Some(Boolean(true))),
-                        ],
-                    },
-                ],
-            ),
-            (
-                "UPDATE TEST_UDT_UPDATE SET v = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    CqlValue::UserDefinedType {
-                        keyspace: "".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(3))),
-                            ("bool_val".to_string(), Some(Boolean(false))),
-                        ],
-                    },
-                    Int(0),
-                    Int(1),
-                ],
-            ),
-            (
-                "UPDATE TEST_UDT_UPDATE SET v = null WHERE pk = ? AND ck = ?",
-                vec![Int(0), Int(1)],
-            ),
+            "INSERT INTO TEST_UDT_UPDATE (pk, ck, v) VALUES (0, 1, {int_val: 1, bool_val: true})",
+            "UPDATE TEST_UDT_UPDATE SET v = {int_val: 3, bool_val: false} WHERE pk = 0 AND ck = 1",
+            "UPDATE TEST_UDT_UPDATE SET v = null WHERE pk = 0 AND ck = 1",
         ];
 
         test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
@@ -1084,14 +825,8 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO LIST_REPLACE (pk, ck, v) VALUES (?, ?, ?)",
-                vec![Int(1), Int(2), List(vec![Int(1), Int(3), Int(5), Int(7)])],
-            ),
-            (
-                "UPDATE LIST_REPLACE SET v = ? WHERE pk = ? AND ck = ?",
-                vec![List(vec![Int(2), Int(4), Int(6), Int(8)]), Int(1), Int(2)],
-            ),
+            "INSERT INTO LIST_REPLACE (pk, ck, v) VALUES (1, 2, [1, 3, 5, 7])",
+            "UPDATE LIST_REPLACE SET v = [2, 4, 6, 8] WHERE pk = 1 AND ck = 2",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -1109,14 +844,8 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "INSERT INTO COMPARE_TIME (pk, ck, v1, v2) VALUES (?, ?, ?, ?)",
-                vec![Int(1), Int(2), Int(3), Boolean(true)],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v2 = ? WHERE pk = ? AND ck = ?",
-                vec![Boolean(false), Int(1), Int(2)],
-            ),
+            "INSERT INTO COMPARE_TIME (pk, ck, v1, v2) VALUES (1, 2, 3, true)",
+            "UPDATE COMPARE_TIME SET v2 = false WHERE pk = 1 AND ck = 2",
         ];
 
         let session = Arc::new(
@@ -1135,8 +864,8 @@ mod tests {
         // We update timestamps for v2 column in src.
         session
             .query(
-                "UPDATE COMPARE_TIME SET v2 = ? WHERE pk = ? AND ck = ?",
-                (false, 1, 2),
+                "UPDATE COMPARE_TIME SET v2 = false WHERE pk = 1 AND ck = 2",
+                [],
             )
             .await
             .unwrap();
@@ -1166,74 +895,15 @@ mod tests {
         };
 
         let operations = vec![
-            (
-                "UPDATE COMPARE_TIME SET v1 = ? WHERE pk = ? AND ck = ?",
-                vec![Tuple(vec![Some(Int(0)), Some(Int(0))]), Int(1), Int(1)],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v2 = ? WHERE pk = ? AND ck = ?",
-                vec![Map(vec![(Int(1), Int(1))]), Int(2), Int(2)],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v3 = ? WHERE pk = ? AND ck = ?",
-                vec![Set(vec![Map(vec![(Int(1), Int(1))])]), Int(3), Int(3)],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v4 = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Tuple(vec![Some(Map(vec![(Int(1), Int(1))]))]),
-                    Int(4),
-                    Int(4),
-                ],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v5 = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Set(vec![Set(vec![Set(vec![Int(10), Int(-10)])])]),
-                    Int(5),
-                    Int(5),
-                ],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v6 = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Tuple(vec![
-                        Some(Tuple(vec![
-                            Some(Map(vec![(Int(20), Int(30))])),
-                            Some(Set(vec![Int(4324)])),
-                        ])),
-                        None,
-                    ]),
-                    Int(6),
-                    Int(6),
-                ],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v7 = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Set(vec![Tuple(vec![
-                        Some(Set(vec![Int(4324)])),
-                        Some(Map(vec![(Int(42), Int(42))])),
-                    ])]),
-                    Int(5),
-                    Int(5),
-                ],
-            ),
-            (
-                "UPDATE COMPARE_TIME SET v7 = v7 + ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Set(vec![Tuple(vec![
-                        Some(Set(vec![Int(-4324)])),
-                        Some(Map(vec![(Int(-42), Int(-42))])),
-                    ])]),
-                    Int(5),
-                    Int(5),
-                ],
-            ),
-            (
-                "DELETE v4 FROM COMPARE_TIME WHERE pk = ? AND CK = ?",
-                vec![Int(4), Int(4)],
-            ),
+            "UPDATE COMPARE_TIME SET v1 = (0, 0) WHERE pk = 1 AND ck = 1",
+            "UPDATE COMPARE_TIME SET v2 = {1: 1} WHERE pk = 2 AND ck = 2",
+            "UPDATE COMPARE_TIME SET v3 = {{1: 1}} WHERE pk = 3 AND ck = 3",
+            "UPDATE COMPARE_TIME SET v4 = ({1: 1}) WHERE pk = 4 AND ck = 4",
+            "UPDATE COMPARE_TIME SET v5 = {{{10, -10}}} WHERE pk = 5 AND ck = 5",
+            "UPDATE COMPARE_TIME SET v6 = (({20: 30}, {4324}), null) WHERE pk = 6 AND ck = 6",
+            "UPDATE COMPARE_TIME SET v7 = {({4324}, {42: 42})} WHERE pk = 5 AND ck = 5",
+            "UPDATE COMPARE_TIME SET v7 = v7 + {({-4324}, {-42: -42})} WHERE pk = 5 AND ck = 5",
+            "DELETE v4 FROM COMPARE_TIME WHERE pk = 4 AND CK = 4",
         ];
 
         test_replication(&get_uri(), schema, operations)
@@ -1256,40 +926,10 @@ mod tests {
         }];
 
         let operations = vec![
-            (
-                "INSERT INTO TEST_UDT_ELEMENTS_UPDATE (pk, ck, v) VALUES (?, ?, ?)",
-                vec![
-                    Int(0),
-                    Int(1),
-                    CqlValue::UserDefinedType {
-                        keyspace: "".to_string(),
-                        type_name: "ut".to_string(),
-                        fields: vec![
-                            ("int_val".to_string(), Some(Int(1)))
-                        ]
-                    }
-                ],
-            ),
-            (
-                "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Int(2),
-                    Int(0),
-                    Int(1),
-                ],
-            ),
-            (
-                "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = ?, v.bool_val = null WHERE pk = ? AND ck = ?",
-                vec![Int(5), Int(0), Int(1)],
-            ),
-            (
-                "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null, v.bool_val = ? WHERE pk = ? AND ck = ?",
-                vec![
-                    Boolean(false),
-                    Int(0),
-                    Int(1),
-                ],
-            ),
+            "INSERT INTO TEST_UDT_ELEMENTS_UPDATE (pk, ck, v) VALUES (0, 1, {int_val: 1})",
+            "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = 2 WHERE pk = 0 AND ck = 1",
+            "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = 5, v.bool_val = null WHERE pk = 0 AND ck = 1",
+            "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null, v.bool_val = false WHERE pk = 0 AND ck = 1",
         ];
 
         test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
