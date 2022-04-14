@@ -88,6 +88,215 @@ impl PrecomputedQueries {
             delete_query,
         })
     }
+
+    async fn delete_partition(&self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+        self.run_prepared_statement(self.partition_delete_query.clone(), values, timestamp)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn insert_value(&self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+        self.run_prepared_statement(self.insert_query.clone(), values, timestamp)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_row(&self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+        self.run_prepared_statement(self.delete_query.clone(), values, timestamp)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn overwrite_value(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        self.run_statement(
+            Query::new(format!(
+                "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
+                self.destination_table_params.dest_keyspace_name,
+                self.destination_table_params.dest_table_name,
+                column_name,
+                self.destination_table_params.keys_cond
+            )),
+            values,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_value(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        // We have to use UPDATE with … = null syntax instead of a DELETE statement as
+        // DELETE will use incorrect timestamp for non-frozen collections. More info in the documentation:
+        // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
+        self.run_statement(
+            Query::new(format!(
+                "UPDATE {}.{} SET {} = NULL WHERE {}",
+                self.destination_table_params.dest_keyspace_name,
+                self.destination_table_params.dest_table_name,
+                column_name,
+                self.destination_table_params.keys_cond
+            )),
+            values,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_map_or_set_elements(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        self.run_statement(
+            Query::new(format!(
+                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
+                ks = self.destination_table_params.dest_keyspace_name,
+                tbl = self.destination_table_params.dest_table_name,
+                cond = self.destination_table_params.keys_cond,
+                cname = column_name,
+            )),
+            values,
+            timestamp,
+        ).await?;
+
+        Ok(())
+    }
+
+    async fn delete_list_value(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        // If the list was replaced with syntax "(...) SET l = [(...)]",
+        // we have to manually delete the list
+        // and add every element with timeuuid from the original table,
+        // because we want to preserve the timestamps of the list elements.
+        // More information:
+        // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
+        self.run_statement(
+            Query::new(format!(
+                "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
+                ks = self.destination_table_params.dest_keyspace_name,
+                tbl = self.destination_table_params.dest_table_name,
+                col = column_name,
+                cond = self.destination_table_params.keys_cond,
+            )),
+            values,
+            timestamp,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_list_elements(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        // We use the same query for updating and deleting values.
+        // In case of deleting, we simply set the value to null.
+        let update_query = Query::new(format!(
+            "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
+            ks = self.destination_table_params.dest_keyspace_name,
+            tbl = self.destination_table_params.dest_table_name,
+            list = column_name,
+            cond = self.destination_table_params.keys_cond
+        ));
+
+        self.run_statement(update_query.clone(), values, timestamp)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn update_udt_elements(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        column_name: &str,
+    ) -> anyhow::Result<()> {
+        let update_query = format!(
+            "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
+            ks = self.destination_table_params.dest_keyspace_name,
+            tbl = self.destination_table_params.dest_table_name,
+            cname = column_name,
+            cond = self.destination_table_params.keys_cond,
+        );
+
+        self.run_statement(Query::new(update_query), values, timestamp)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_udt_elements(
+        &self,
+        values: &[impl Value],
+        timestamp: i64,
+        removed_fields: &str,
+    ) -> anyhow::Result<()> {
+        let remove_query = format!(
+            "UPDATE {ks}.{tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
+            ks = self.destination_table_params.dest_keyspace_name,
+            tbl = self.destination_table_params.dest_table_name,
+            removed_fields = removed_fields,
+            cond = self.destination_table_params.keys_cond,
+        );
+
+        self.run_statement(Query::new(remove_query), values, timestamp)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn run_prepared_statement(
+        &self,
+        mut query: PreparedStatement,
+        values: &[impl Value],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        query.set_timestamp(Some(timestamp));
+        self.destination_table_params
+            .dest_session
+            .execute(&query, values)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn run_statement(
+        &self,
+        mut query: Query,
+        values: &[impl Value],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        query.set_timestamp(Some(timestamp));
+        self.destination_table_params
+            .dest_session
+            .query(query, values)
+            .await?;
+
+        Ok(())
+    }
 }
 
 struct SourceTableData {
@@ -149,12 +358,9 @@ impl ReplicatorConsumer {
             .map(|col_name| data.get_value(col_name).as_ref().unwrap())
             .collect::<Vec<&CqlValue>>();
 
-        self.run_prepared_statement(
-            self.precomputed_queries.partition_delete_query.clone(),
-            &values,
-            timestamp,
-        )
-        .await?;
+        self.precomputed_queries
+            .delete_partition(&values, timestamp)
+            .await?;
 
         Ok(())
     }
@@ -192,18 +398,9 @@ impl ReplicatorConsumer {
         values_for_update.insert(2, &deleted_set);
         // New order of values: ttl, added elements, deleted elements, pk condition values.
 
-        self.run_statement(
-            Query::new(format!(
-                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                ks = self.precomputed_queries.destination_table_params.dest_keyspace_name,
-                tbl = self.precomputed_queries.destination_table_params.dest_table_name,
-                cond = self.precomputed_queries.destination_table_params.keys_cond,
-                cname = column_name,
-            )),
-            &values_for_update,
-            timestamp,
-        )
-        .await?;
+        self.precomputed_queries
+            .update_map_or_set_elements(&values_for_update, timestamp, column_name)
+            .await?;
 
         Ok(())
     }
@@ -253,41 +450,10 @@ impl ReplicatorConsumer {
         timestamp: i64,
     ) -> anyhow::Result<()> {
         if data.is_value_deleted(column_name) {
-            // If the list was replaced with syntax "(...) SET l = [(...)]",
-            // we have to manually delete the list
-            // and add every element with timeuuid from the original table,
-            // because we want to preserve the timestamps of the list elements.
-            // More information:
-            // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
-            self.run_statement(
-                Query::new(format!(
-                    "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
-                    ks = self
-                        .precomputed_queries
-                        .destination_table_params
-                        .dest_keyspace_name,
-                    tbl = self
-                        .precomputed_queries
-                        .destination_table_params
-                        .dest_table_name,
-                    col = column_name,
-                    cond = self.precomputed_queries.destination_table_params.keys_cond,
-                )),
-                pk_values,
-                timestamp,
-            )
-            .await?;
+            self.precomputed_queries
+                .delete_list_value(pk_values, timestamp, column_name)
+                .await?;
         }
-
-        // We use the same query for updating and deleting values.
-        // In case of deleting, we simply set the value to null.
-        let update_query = Query::new(format!(
-            "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
-            ks = self.precomputed_queries.destination_table_params.dest_keyspace_name,
-            tbl = self.precomputed_queries.destination_table_params.dest_table_name,
-            list = column_name,
-            cond = self.precomputed_queries.destination_table_params.keys_cond
-        ));
 
         if let Some(added_elements) = data.get_value(column_name) {
             let added_elements = added_elements.as_map().unwrap();
@@ -295,7 +461,8 @@ impl ReplicatorConsumer {
                 values_for_update[1] = Some(key);
                 values_for_update[2] = Some(val);
 
-                self.run_statement(update_query.clone(), values_for_update, timestamp)
+                self.precomputed_queries
+                    .update_list_elements(values_for_update, timestamp, column_name)
                     .await?;
             }
         }
@@ -304,7 +471,8 @@ impl ReplicatorConsumer {
             values_for_update[1] = Some(removed);
             values_for_update[2] = None;
 
-            self.run_statement(update_query.clone(), values_for_update, timestamp)
+            self.precomputed_queries
+                .update_list_elements(values_for_update, timestamp, column_name)
                 .await?;
         }
 
@@ -330,21 +498,8 @@ impl ReplicatorConsumer {
         let values_for_update = &mut values_for_update.to_vec();
         values_for_update[1] = value;
 
-        let update_query = format!(
-            "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
-            ks = self
-                .precomputed_queries
-                .destination_table_params
-                .dest_keyspace_name,
-            tbl = self
-                .precomputed_queries
-                .destination_table_params
-                .dest_table_name,
-            cname = column_name,
-            cond = self.precomputed_queries.destination_table_params.keys_cond,
-        );
-
-        self.run_statement(Query::new(update_query), values_for_update, timestamp)
+        self.precomputed_queries
+            .update_udt_elements(values_for_update, timestamp, column_name)
             .await?;
 
         self.delete_udt_elements(column_name, data, timestamp, value, values_for_update)
@@ -377,21 +532,8 @@ impl ReplicatorConsumer {
             let values_for_update = &mut values_for_update.to_vec();
             values_for_update.remove(1);
 
-            let remove_query = format!(
-                "UPDATE {ks}.{tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
-                ks = self
-                    .precomputed_queries
-                    .destination_table_params
-                    .dest_keyspace_name,
-                tbl = self
-                    .precomputed_queries
-                    .destination_table_params
-                    .dest_table_name,
-                removed_fields = removed_fields,
-                cond = self.precomputed_queries.destination_table_params.keys_cond,
-            );
-
-            self.run_statement(Query::new(remove_query), values_for_update, timestamp)
+            self.precomputed_queries
+                .delete_udt_elements(values_for_update, timestamp, removed_fields.as_str())
                 .await?;
         }
 
@@ -441,13 +583,9 @@ impl ReplicatorConsumer {
     // Recreates row deletion.
     async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
-
-        self.run_prepared_statement(
-            self.precomputed_queries.delete_query.clone(),
-            &values,
-            timestamp,
-        )
-        .await?;
+        self.precomputed_queries
+            .delete_row(&values, timestamp)
+            .await?;
 
         Ok(())
     }
@@ -464,42 +602,13 @@ impl ReplicatorConsumer {
         if let Some(value) = data.get_value(column_name) {
             // Order of values: ttl, inserted value, pk condition values.
             values_for_update[1] = value;
-            self.run_statement(
-                Query::new(format!(
-                    "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
-                    self.precomputed_queries
-                        .destination_table_params
-                        .dest_keyspace_name,
-                    self.precomputed_queries
-                        .destination_table_params
-                        .dest_table_name,
-                    column_name,
-                    self.precomputed_queries.destination_table_params.keys_cond
-                )),
-                values_for_update,
-                timestamp,
-            )
-            .await?;
+            self.precomputed_queries
+                .overwrite_value(values_for_update, timestamp, column_name)
+                .await?;
         } else if data.is_value_deleted(column_name) {
-            // We have to use UPDATE with … = null syntax instead of a DELETE statement as
-            // DELETE will use incorrect timestamp for non-frozen collections. More info in the documentation:
-            // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
-            self.run_statement(
-                Query::new(format!(
-                    "UPDATE {}.{} SET {} = NULL WHERE {}",
-                    self.precomputed_queries
-                        .destination_table_params
-                        .dest_keyspace_name,
-                    self.precomputed_queries
-                        .destination_table_params
-                        .dest_table_name,
-                    column_name,
-                    self.precomputed_queries.destination_table_params.keys_cond
-                )),
-                values_for_delete,
-                timestamp,
-            )
-            .await?;
+            self.precomputed_queries
+                .delete_value(values_for_delete, timestamp, column_name)
+                .await?;
         }
 
         Ok(())
@@ -514,12 +623,9 @@ impl ReplicatorConsumer {
             insert_values.extend(values.iter());
             insert_values.push(&ttl);
 
-            self.run_prepared_statement(
-                self.precomputed_queries.insert_query.clone(),
-                &insert_values,
-                timestamp,
-            )
-            .await?;
+            self.precomputed_queries
+                .insert_value(&insert_values, timestamp)
+                .await?;
         }
 
         let mut values_for_update = Vec::with_capacity(2 + values.len());
@@ -601,38 +707,6 @@ impl ReplicatorConsumer {
                 }
             }
         }
-
-        Ok(())
-    }
-
-    async fn run_prepared_statement(
-        &self,
-        mut query: PreparedStatement,
-        values: &[impl Value],
-        timestamp: i64,
-    ) -> anyhow::Result<()> {
-        query.set_timestamp(Some(timestamp));
-        self.precomputed_queries
-            .destination_table_params
-            .dest_session
-            .execute(&query, values)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn run_statement(
-        &self,
-        mut query: Query,
-        values: &[impl Value],
-        timestamp: i64,
-    ) -> anyhow::Result<()> {
-        query.set_timestamp(Some(timestamp));
-        self.precomputed_queries
-            .destination_table_params
-            .dest_session
-            .query(query, values)
-            .await?;
 
         Ok(())
     }
