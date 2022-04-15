@@ -29,7 +29,6 @@ impl ConsumerFactory for PrinterConsumerFactory {
 mod tests {
     use std::sync::Arc;
     use std::time;
-    use std::time::SystemTime;
 
     use scylla::batch::Consistency;
     use scylla::query::Query;
@@ -41,11 +40,11 @@ mod tests {
 
     use super::*;
 
-    const SECOND_IN_MILLIS: i64 = 1_000;
+    const SECOND_IN_MILLIS: u64 = 1_000;
     const TEST_TABLE: &str = "t";
-    const SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
-    const WINDOW_SIZE: i64 = SECOND_IN_MILLIS / 10 * 3;
-    const SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
+    const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
+    const WINDOW_SIZE: u64 = SECOND_IN_MILLIS / 10 * 3;
+    const SAFETY_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
 
     fn get_create_table_query() -> String {
         format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};",
@@ -89,12 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cdc_log_printer() {
-        let start = chrono::Duration::from_std(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap(),
-        )
-        .unwrap();
+        let start = chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
         let end = start + chrono::Duration::seconds(2);
 
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
@@ -117,9 +111,9 @@ mod tests {
             TEST_TABLE.to_string(),
             start,
             end,
-            time::Duration::from_millis(WINDOW_SIZE as u64),
-            time::Duration::from_millis(SAFETY_INTERVAL as u64),
-            time::Duration::from_millis(SLEEP_INTERVAL as u64),
+            time::Duration::from_millis(WINDOW_SIZE),
+            time::Duration::from_millis(SAFETY_INTERVAL),
+            time::Duration::from_millis(SLEEP_INTERVAL),
             Arc::new(PrinterConsumerFactory),
         );
 
