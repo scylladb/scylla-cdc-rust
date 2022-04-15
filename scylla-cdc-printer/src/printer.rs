@@ -35,60 +35,49 @@ mod tests {
     use scylla::Session;
     use scylla::SessionBuilder;
     use scylla_cdc::log_reader::CDCLogReader;
+    use scylla_cdc::test_utilities::unique_name;
     use tokio::time::sleep;
 
     use super::*;
 
     const SECOND_IN_MILLIS: i64 = 1_000;
-    const TEST_KEYSPACE: &str = "test";
     const TEST_TABLE: &str = "t";
     const SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
     const WINDOW_SIZE: i64 = SECOND_IN_MILLIS / 10 * 3;
     const SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
 
     fn get_create_table_query() -> String {
-        format!("CREATE TABLE IF NOT EXISTS {}.{} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};",
-                TEST_KEYSPACE,
+        format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};",
                 TEST_TABLE
         )
     }
 
-    async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<()> {
+    async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<String> {
+        let ks = unique_name();
         let mut create_keyspace_query = Query::new(format!(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 1}};",
-            TEST_KEYSPACE
+            ks
         ));
         create_keyspace_query.set_consistency(Consistency::All);
 
         session.query(create_keyspace_query, &[]).await?;
         session.await_schema_agreement().await?;
+        session.use_keyspace(&ks, false).await?;
 
         // Create test table
         let create_table_query = get_create_table_query();
         session.query(create_table_query, &[]).await?;
         session.await_schema_agreement().await?;
-
-        let table_name_under_keyspace = format!("{}.{}", TEST_KEYSPACE, TEST_TABLE);
-        session
-            .query(format!("TRUNCATE {};", table_name_under_keyspace), &[])
-            .await?;
-        session
-            .query(
-                format!("TRUNCATE {}_scylla_cdc_log;", table_name_under_keyspace),
-                &[],
-            )
-            .await?;
-        Ok(())
+        Ok(ks)
     }
 
     async fn populate_db_with_pk(session: &Arc<Session>, pk: u32) -> anyhow::Result<()> {
-        let table_name_under_keyspace = format!("{}.{}", TEST_KEYSPACE, TEST_TABLE);
         for i in 0..3 {
             session
                 .query(
                     format!(
                         "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, 'val{}', 'static{}');",
-                        table_name_under_keyspace, pk, i, i, i
+                        TEST_TABLE, pk, i, i, i
                     ),
                     &[],
                 )
@@ -113,7 +102,7 @@ mod tests {
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;
-        create_test_db(&shared_session).await.unwrap();
+        let ks = create_test_db(&shared_session).await.unwrap();
         populate_db_with_pk(&shared_session, partition_key_1)
             .await
             .unwrap();
@@ -123,7 +112,7 @@ mod tests {
 
         let (mut cdc_log_printer, _handle) = CDCLogReader::new(
             shared_session,
-            TEST_KEYSPACE.to_string(),
+            ks,
             TEST_TABLE.to_string(),
             start,
             end,
