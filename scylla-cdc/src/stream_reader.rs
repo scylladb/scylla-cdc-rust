@@ -15,7 +15,7 @@ pub struct StreamReader {
     session: Arc<Session>,
     stream_id_vec: Vec<StreamID>,
     lower_timestamp: chrono::Duration,
-    window_size: chrono::Duration,
+    window_size: time::Duration,
     safety_interval: chrono::Duration,
     upper_timestamp: tokio::sync::Mutex<Option<chrono::Duration>>,
     sleep_interval: time::Duration,
@@ -26,7 +26,7 @@ impl StreamReader {
         session: &Arc<Session>,
         stream_ids: Vec<StreamID>,
         start_timestamp: chrono::Duration,
-        window_size: chrono::Duration,
+        window_size: time::Duration,
         safety_interval: chrono::Duration,
         sleep_interval: time::Duration,
     ) -> StreamReader {
@@ -61,6 +61,7 @@ impl StreamReader {
         );
         let query_base = self.session.prepare(query).await?;
         let mut window_begin = self.lower_timestamp;
+        let window_size = chrono::Duration::from_std(self.window_size)?;
 
         loop {
             let now = chrono::Local::now().timestamp_millis();
@@ -68,7 +69,7 @@ impl StreamReader {
             let window_end = max(
                 window_begin,
                 min(
-                    window_begin + self.window_size,
+                    window_begin + window_size,
                     chrono::Duration::milliseconds(now - self.safety_interval.num_milliseconds()),
                 ),
             );
@@ -132,7 +133,7 @@ mod tests {
             session: &Arc<Session>,
             stream_ids: Vec<StreamID>,
             start_timestamp: chrono::Duration,
-            window_size: chrono::Duration,
+            window_size: time::Duration,
             safety_interval: chrono::Duration,
             sleep_interval: time::Duration,
         ) -> StreamReader {
@@ -155,7 +156,7 @@ mod tests {
             chrono::Local::now().timestamp_millis() - START_TIME_DELAY_IN_MILLIS,
         );
         let sleep_interval: time::Duration = time::Duration::from_millis(SLEEP_INTERVAL as u64);
-        let window_size: chrono::Duration = chrono::Duration::milliseconds(WINDOW_SIZE);
+        let window_size: time::Duration = time::Duration::from_millis(WINDOW_SIZE as u64);
         let safety_interval: chrono::Duration = chrono::Duration::milliseconds(SAFETY_INTERVAL);
 
         let reader = StreamReader::test_new(

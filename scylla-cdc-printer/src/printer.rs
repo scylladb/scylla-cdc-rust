@@ -116,7 +116,7 @@ mod tests {
             TEST_TABLE.to_string(),
             start,
             end,
-            chrono::Duration::milliseconds(WINDOW_SIZE),
+            Duration::from_millis(WINDOW_SIZE as u64),
             chrono::Duration::milliseconds(SAFETY_INTERVAL),
             Duration::from_millis(SLEEP_INTERVAL as u64),
             Arc::new(PrinterConsumerFactory),
