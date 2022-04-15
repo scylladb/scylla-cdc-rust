@@ -28,7 +28,8 @@ impl ConsumerFactory for PrinterConsumerFactory {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time;
+    use std::time::SystemTime;
 
     use scylla::batch::Consistency;
     use scylla::query::Query;
@@ -116,13 +117,13 @@ mod tests {
             TEST_TABLE.to_string(),
             start,
             end,
-            Duration::from_millis(WINDOW_SIZE as u64),
-            Duration::from_millis(SAFETY_INTERVAL as u64),
-            Duration::from_millis(SLEEP_INTERVAL as u64),
+            time::Duration::from_millis(WINDOW_SIZE as u64),
+            time::Duration::from_millis(SAFETY_INTERVAL as u64),
+            time::Duration::from_millis(SLEEP_INTERVAL as u64),
             Arc::new(PrinterConsumerFactory),
         );
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(time::Duration::from_secs(2)).await;
 
         cdc_log_printer.stop();
     }

@@ -6,7 +6,7 @@ use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::Session;
 use std::cmp::max;
-use std::time::Duration;
+use std::time;
 
 use crate::cdc_types::GenerationTimestamp;
 use crate::consumer::ConsumerFactory;
@@ -29,9 +29,9 @@ impl CDCLogReader {
         table_name: String,
         start_timestamp: chrono::Duration,
         end_timestamp: chrono::Duration,
-        window_size: Duration,
-        safety_interval: Duration,
-        sleep_interval: Duration,
+        window_size: time::Duration,
+        safety_interval: time::Duration,
+        sleep_interval: time::Duration,
         consumer_factory: Arc<dyn ConsumerFactory>,
     ) -> (Self, RemoteHandle<anyhow::Result<()>>) {
         let (end_timestamp_sender, end_timestamp_receiver) =
@@ -73,9 +73,9 @@ struct CDCReaderWorker {
     table_name: String,
     start_timestamp: chrono::Duration,
     end_timestamp: chrono::Duration,
-    sleep_interval: Duration,
-    window_size: Duration,
-    safety_interval: Duration,
+    sleep_interval: time::Duration,
+    window_size: time::Duration,
+    safety_interval: time::Duration,
     readers: Vec<Arc<StreamReader>>,
     end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
     consumer_factory: Arc<dyn ConsumerFactory>,
@@ -89,9 +89,9 @@ impl CDCReaderWorker {
         table_name: String,
         start_timestamp: chrono::Duration,
         end_timestamp: chrono::Duration,
-        window_size: Duration,
-        safety_interval: Duration,
-        sleep_interval: Duration,
+        window_size: time::Duration,
+        safety_interval: time::Duration,
+        sleep_interval: time::Duration,
         end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
         consumer_factory: Arc<dyn ConsumerFactory>,
     ) -> CDCReaderWorker {
