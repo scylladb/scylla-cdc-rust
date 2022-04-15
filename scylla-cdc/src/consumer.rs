@@ -261,18 +261,18 @@ mod tests {
     // the setup for this module is based on generation fetcher's tests.
 
     use super::*;
+    use crate::test_utilities::unique_name;
     use scylla::batch::Consistency;
     use scylla::query::Query;
     use scylla::{Session, SessionBuilder};
     // These tests should be indifferent to things like number of Scylla nodes,
     // so if run separately, they can be tested on one Scylla instance.
 
-    const TEST_SINGLE_VALUE_TABLE: &str = "ConsumerTest.single_value";
-    const TEST_SINGLE_COLLECTION_TABLE: &str = "ConsumerTest.single_collection";
-    const TEST_KEYSPACE: &str = "ConsumerTest";
+    const TEST_SINGLE_VALUE_TABLE: &str = "single_value";
+    const TEST_SINGLE_COLLECTION_TABLE: &str = "single_collection";
     const CDC_CONFIG: &str = "{'enabled': 'true'}";
-    const TEST_SINGLE_VALUE_CDC_TABLE: &str = "ConsumerTest.single_value_scylla_cdc_log";
-    const TEST_SINGLE_COLLECTION_CDC_TABLE: &str = "ConsumerTest.single_collection_scylla_cdc_log";
+    const TEST_SINGLE_VALUE_CDC_TABLE: &str = "single_value_scylla_cdc_log";
+    const TEST_SINGLE_COLLECTION_CDC_TABLE: &str = "single_collection_scylla_cdc_log";
 
     fn construct_single_value_table_query() -> String {
         format!(
@@ -327,16 +327,18 @@ mod tests {
 
     // This is copied from stream_generations::tests, because we plan to standardize this.
     async fn create_test_db(session: &Session) {
+        let ks = unique_name();
         // These tests don't rely on how the cluster looks like, so we can test on one node.
         let mut query = Query::new(format!(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH replication
                 = {{'class':'SimpleStrategy', 'replication_factor': 1}};",
-            TEST_KEYSPACE
+            ks
         ));
         query.set_consistency(Consistency::All);
 
         session.query(query, &[]).await.unwrap();
         session.await_schema_agreement().await.unwrap();
+        session.use_keyspace(ks, false).await.unwrap();
 
         // Create test tables containing sample data for tests.
         for query in vec![
@@ -346,19 +348,6 @@ mod tests {
             session.query(query, &[]).await.unwrap();
         }
         session.await_schema_agreement().await.unwrap();
-
-        // Delete all leftovers from previous tests.
-        for table in vec![
-            TEST_SINGLE_VALUE_TABLE.to_string(),
-            TEST_SINGLE_COLLECTION_TABLE.to_string(),
-            TEST_SINGLE_VALUE_CDC_TABLE.to_string(),
-            TEST_SINGLE_COLLECTION_CDC_TABLE.to_string(),
-        ] {
-            session
-                .query(format!("TRUNCATE {};", table), &[])
-                .await
-                .unwrap();
-        }
     }
 
     async fn setup() -> anyhow::Result<Session> {
