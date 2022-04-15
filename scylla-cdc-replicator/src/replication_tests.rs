@@ -10,6 +10,8 @@ mod tests {
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
     use std::sync::Arc;
 
+    use scylla_cdc::test_utilities::unique_name;
+
     /// Tuple representing a column in the table that will be replicated.
     /// The first string is the name of the column.
     /// The second string is the name of the type of the column.
@@ -38,14 +40,21 @@ mod tests {
         TimestampsNotMatching(usize, String),
     }
 
-    async fn setup_keyspaces(session: &Session) -> anyhow::Result<()> {
-        session.query("CREATE KEYSPACE IF NOT EXISTS test_src WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1}", ()).await?;
-        session.query("CREATE KEYSPACE IF NOT EXISTS test_dst WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1}", ()).await?;
+    async fn setup_keyspaces(session: &Session) -> anyhow::Result<(String, String)> {
+        let ks_src = unique_name();
+        let ks_dst = unique_name();
+        session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{ 'class' : 'SimpleStrategy', 'replication_factor' : 1 }}", ks_src), ()).await?;
+        session.query(format!("CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{ 'class' : 'SimpleStrategy', 'replication_factor' : 1 }}", ks_dst), ()).await?;
 
-        Ok(())
+        Ok((ks_src, ks_dst))
     }
 
-    async fn setup_udts(session: &Session, schemas: &[TestUDTSchema<'_>]) -> anyhow::Result<()> {
+    async fn setup_udts(
+        session: &Session,
+        ks_src: &str,
+        ks_dst: &str,
+        schemas: &[TestUDTSchema<'_>],
+    ) -> anyhow::Result<()> {
         for udt_schema in schemas {
             let udt_fields = udt_schema
                 .fields
@@ -55,8 +64,8 @@ mod tests {
             session
                 .query(
                     format!(
-                        "CREATE TYPE IF NOT EXISTS test_src.{} ({})",
-                        udt_schema.name, udt_fields
+                        "CREATE TYPE IF NOT EXISTS {}.{} ({})",
+                        ks_src, udt_schema.name, udt_fields
                     ),
                     (),
                 )
@@ -64,8 +73,8 @@ mod tests {
             session
                 .query(
                     format!(
-                        "CREATE TYPE IF NOT EXISTS test_dst.{} ({})",
-                        udt_schema.name, udt_fields
+                        "CREATE TYPE IF NOT EXISTS {}.{} ({})",
+                        ks_dst, udt_schema.name, udt_fields
                     ),
                     (),
                 )
@@ -77,14 +86,12 @@ mod tests {
         Ok(())
     }
 
-    async fn setup_tables(session: &Session, schema: &TestTableSchema<'_>) -> anyhow::Result<()> {
-        session
-            .query(format!("DROP TABLE IF EXISTS test_src.{}", schema.name), ())
-            .await?;
-        session
-            .query(format!("DROP TABLE IF EXISTS test_dst.{}", schema.name), ())
-            .await?;
-
+    async fn setup_tables(
+        session: &Session,
+        ks_src: &str,
+        ks_dst: &str,
+        schema: &TestTableSchema<'_>,
+    ) -> anyhow::Result<()> {
         let partition_key_name = match schema.partition_key.as_slice() {
             [pk] => pk.0.to_string(),
             _ => format!(
@@ -108,8 +115,8 @@ mod tests {
         session
             .query(
                 format!(
-                    "CREATE TABLE test_src.{} {} WITH cdc = {{'enabled' : true}}",
-                    schema.name, create_table_query
+                    "CREATE TABLE {}.{} {} WITH cdc = {{'enabled' : true}}",
+                    ks_src, schema.name, create_table_query
                 ),
                 (),
             )
@@ -117,8 +124,8 @@ mod tests {
         session
             .query(
                 format!(
-                    "CREATE TABLE test_dst.{} {}",
-                    schema.name, create_table_query
+                    "CREATE TABLE {}.{} {}",
+                    ks_dst, schema.name, create_table_query
                 ),
                 (),
             )
@@ -131,9 +138,10 @@ mod tests {
 
     async fn execute_queries(
         session: &Session,
+        ks_src: &str,
         operations: Vec<TestOperation<'_>>,
     ) -> anyhow::Result<()> {
-        session.use_keyspace("test_src", false).await?;
+        session.use_keyspace(ks_src, false).await?;
         for operation in operations {
             session.query(operation, []).await?;
         }
@@ -141,10 +149,15 @@ mod tests {
         Ok(())
     }
 
-    async fn replicate(session: &Arc<Session>, name: &str) -> anyhow::Result<()> {
+    async fn replicate(
+        session: &Arc<Session>,
+        ks_src: &str,
+        ks_dst: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
         let result = session
             .query(
-                format!("SELECT * FROM test_src.{}_scylla_cdc_log", name),
+                format!("SELECT * FROM {}.{}_scylla_cdc_log", ks_src, name),
                 (),
             )
             .await?;
@@ -152,7 +165,7 @@ mod tests {
         let table_schema = session
             .get_cluster_data()
             .get_keyspace_info()
-            .get("test_dst")
+            .get(ks_dst)
             .ok_or_else(|| anyhow!("Keyspace not found"))?
             .tables
             .get(&name.to_ascii_lowercase())
@@ -161,7 +174,7 @@ mod tests {
 
         let mut consumer = ReplicatorConsumer::new(
             session.clone(),
-            "test_dst".to_string(),
+            ks_dst.to_string(),
             name.to_string(),
             table_schema,
         )
@@ -239,14 +252,19 @@ mod tests {
         not_matching == 0
     }
 
-    async fn compare_changes(session: &Session, name: &str) -> anyhow::Result<()> {
+    async fn compare_changes(
+        session: &Session,
+        ks_src: &str,
+        ks_dst: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
         let original_rows = session
-            .query(format!("SELECT * FROM test_src.{}", name), ())
+            .query(format!("SELECT * FROM {}.{}", ks_src, name), ())
             .await?
             .rows
             .unwrap_or_default();
         let replicated_rows = session
-            .query(format!("SELECT * FROM test_dst.{}", name), ())
+            .query(format!("SELECT * FROM {}.{}", ks_dst, name), ())
             .await?
             .rows
             .unwrap_or_default();
@@ -279,14 +297,16 @@ mod tests {
     // Returns vector of timestamps of given column from all rows.
     async fn get_timestamps(
         session: &Session,
+        ks_src: &str,
+        ks_dst: &str,
         table_name: &str,
         column_name: &str,
     ) -> anyhow::Result<(Vec<Row>, Vec<Row>)> {
         let original_rows = session
             .query(
                 format!(
-                    "SELECT WRITETIME ({}) FROM test_src.{}",
-                    column_name, table_name
+                    "SELECT WRITETIME ({}) FROM {}.{}",
+                    column_name, ks_src, table_name
                 ),
                 (),
             )
@@ -296,8 +316,8 @@ mod tests {
         let replicated_rows = session
             .query(
                 format!(
-                    "SELECT WRITETIME ({}) FROM test_dst.{}",
-                    column_name, table_name
+                    "SELECT WRITETIME ({}) FROM {}.{}",
+                    column_name, ks_dst, table_name
                 ),
                 (),
             )
@@ -345,12 +365,14 @@ mod tests {
     // we check beforehand if column's type can be read via the `WRITETIME` function and either compare timestamps or skip them.
     async fn compare_timestamps(
         session: &Session,
+        ks_src: &str,
+        ks_dst: &str,
         schema: &TestTableSchema<'_>,
     ) -> anyhow::Result<()> {
         for (col_name, col_type) in &schema.other_columns {
             if can_read_timestamps(col_type) {
                 let (original_rows, replicated_rows) =
-                    get_timestamps(session, &schema.name, col_name).await?;
+                    get_timestamps(session, ks_src, ks_dst, &schema.name, col_name).await?;
 
                 for (i, (original, replicated)) in
                     original_rows.iter().zip(replicated_rows.iter()).enumerate()
@@ -390,13 +412,13 @@ mod tests {
         operations: Vec<TestOperation<'_>>,
     ) -> anyhow::Result<()> {
         let session = Arc::new(SessionBuilder::new().known_node(node_uri).build().await?);
-        setup_keyspaces(&session).await?;
-        setup_udts(&session, &udt_schemas).await?;
-        setup_tables(&session, &table_schema).await?;
-        execute_queries(&session, operations).await?;
-        replicate(&session, &table_schema.name).await?;
-        compare_changes(&session, &table_schema.name).await?;
-        compare_timestamps(&session, &table_schema).await?;
+        let (ks_src, ks_dst) = setup_keyspaces(&session).await?;
+        setup_udts(&session, &ks_src, &ks_dst, &udt_schemas).await?;
+        setup_tables(&session, &ks_src, &ks_dst, &table_schema).await?;
+        execute_queries(&session, &ks_src, operations).await?;
+        replicate(&session, &ks_src, &ks_dst, &table_schema.name).await?;
+        compare_changes(&session, &ks_src, &ks_dst, &table_schema.name).await?;
+        compare_timestamps(&session, &ks_src, &ks_dst, &table_schema).await?;
 
         Ok(())
     }
@@ -855,12 +877,21 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        setup_tables(&session, &schema).await.unwrap();
-        execute_queries(&session, operations).await.unwrap();
+        let (ks_src, ks_dst) = setup_keyspaces(&session).await.unwrap();
+        setup_tables(&session, &ks_src, &ks_dst, &schema)
+            .await
+            .unwrap();
+        execute_queries(&session, &ks_src, operations)
+            .await
+            .unwrap();
 
-        replicate(&session, &schema.name).await.unwrap();
+        replicate(&session, &ks_src, &ks_dst, &schema.name)
+            .await
+            .unwrap();
 
-        compare_changes(&session, &schema.name).await.unwrap();
+        compare_changes(&session, &ks_src, &ks_dst, &schema.name)
+            .await
+            .unwrap();
         // We update timestamps for v2 column in src.
         session
             .query(
@@ -871,9 +902,10 @@ mod tests {
             .unwrap();
 
         // Assert that replicator panics when timestamps are not matching.
-        let result = std::panic::AssertUnwindSafe(compare_timestamps(&session, &schema))
-            .catch_unwind()
-            .await;
+        let result =
+            std::panic::AssertUnwindSafe(compare_timestamps(&session, &ks_src, &ks_dst, &schema))
+                .catch_unwind()
+                .await;
         assert!(result.is_err());
     }
 
