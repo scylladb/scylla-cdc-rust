@@ -8,7 +8,7 @@ use scylla::frame::value::Timestamp;
 use scylla::Session;
 use tokio::time::sleep;
 
-use crate::cdc_types::StreamID;
+use crate::cdc_types::{StreamID, ToTimestamp};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 
 pub struct StreamReader {
@@ -65,13 +65,11 @@ impl StreamReader {
         let safety_interval = chrono::Duration::from_std(self.safety_interval)?;
 
         loop {
-            let now = chrono::Local::now().timestamp_millis();
-
             let window_end = max(
                 window_begin,
                 min(
                     window_begin + window_size,
-                    chrono::Duration::milliseconds(now - safety_interval.num_milliseconds()),
+                    chrono::Local::now().to_timestamp() - safety_interval,
                 ),
             );
 
@@ -126,7 +124,7 @@ mod tests {
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
     const WINDOW_SIZE: u64 = SECOND_IN_MILLIS / 10 * 3;
     const SAFETY_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
-    const START_TIME_DELAY_IN_MILLIS: i64 = 2 * SECOND_IN_MILLIS as i64;
+    const START_TIME_DELAY_IN_SECONDS: i64 = 2;
 
     impl StreamReader {
         fn test_new(
@@ -152,9 +150,8 @@ mod tests {
     async fn get_test_stream_reader(session: &Arc<Session>) -> anyhow::Result<StreamReader> {
         let stream_id_vec = get_cdc_stream_id(session).await?;
 
-        let start_timestamp = chrono::Duration::milliseconds(
-            chrono::Local::now().timestamp_millis() - START_TIME_DELAY_IN_MILLIS,
-        );
+        let start_timestamp = chrono::Local::now().to_timestamp()
+            - chrono::Duration::seconds(START_TIME_DELAY_IN_SECONDS);
         let sleep_interval = time::Duration::from_millis(SLEEP_INTERVAL);
         let window_size = time::Duration::from_millis(WINDOW_SIZE);
         let safety_interval = time::Duration::from_millis(SAFETY_INTERVAL);
@@ -278,11 +275,8 @@ mod tests {
             .unwrap();
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
-        let to_set_upper_timestamp = chrono::Local::now() + chrono::Duration::seconds(1);
         cdc_reader
-            .set_upper_timestamp(chrono::Duration::milliseconds(
-                to_set_upper_timestamp.timestamp_millis(),
-            ))
+            .set_upper_timestamp(chrono::Local::now().to_timestamp() + chrono::Duration::seconds(1))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
@@ -333,11 +327,8 @@ mod tests {
             .unwrap();
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
-        let to_set_upper_timestamp = chrono::Local::now() + chrono::Duration::seconds(1);
         cdc_reader
-            .set_upper_timestamp(chrono::Duration::milliseconds(
-                to_set_upper_timestamp.timestamp_millis(),
-            ))
+            .set_upper_timestamp(chrono::Local::now().to_timestamp() + chrono::Duration::seconds(1))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
@@ -367,9 +358,8 @@ mod tests {
             TEST_TABLE, 0, 0, "val0", "static0"
         ));
         let second_ago = chrono::Local::now() - chrono::Duration::seconds(1);
-        insert_before_upper_timestamp_query.set_timestamp(
-            chrono::Duration::milliseconds(second_ago.timestamp_millis()).num_microseconds(),
-        );
+        insert_before_upper_timestamp_query
+            .set_timestamp(second_ago.to_timestamp().num_microseconds());
         shared_session
             .query(insert_before_upper_timestamp_query, ())
             .await
@@ -377,9 +367,7 @@ mod tests {
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
         cdc_reader
-            .set_upper_timestamp(chrono::Duration::milliseconds(
-                chrono::Local::now().timestamp_millis(),
-            ))
+            .set_upper_timestamp(chrono::Local::now().to_timestamp())
             .await;
 
         let mut insert_after_upper_timestamp_query = Query::new(format!(
@@ -387,9 +375,8 @@ mod tests {
             TEST_TABLE, 0, 1, "val1", "static1"
         ));
         let second_later = chrono::Local::now() + chrono::Duration::seconds(1);
-        insert_after_upper_timestamp_query.set_timestamp(
-            chrono::Duration::milliseconds(second_later.timestamp_millis()).num_microseconds(),
-        );
+        insert_after_upper_timestamp_query
+            .set_timestamp(second_later.to_timestamp().num_microseconds());
         shared_session
             .query(insert_after_upper_timestamp_query, ())
             .await

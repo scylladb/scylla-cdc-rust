@@ -47,6 +47,16 @@ mod tests {
     const WINDOW_SIZE: u64 = SECOND_IN_MILLIS / 10 * 3;
     const SAFETY_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
 
+    trait ToTimestamp {
+        fn to_timestamp(&self) -> chrono::Duration;
+    }
+
+    impl<Tz: chrono::TimeZone> ToTimestamp for chrono::DateTime<Tz> {
+        fn to_timestamp(&self) -> chrono::Duration {
+            chrono::Duration::milliseconds(self.timestamp_millis())
+        }
+    }
+
     fn get_create_table_query() -> String {
         format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};",
                 TEST_TABLE
@@ -89,7 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cdc_log_printer() {
-        let start = chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+        let start = chrono::Local::now().to_timestamp();
         let end = start + chrono::Duration::seconds(2);
 
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
