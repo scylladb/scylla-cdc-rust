@@ -1,12 +1,12 @@
+use std::cmp::max;
 use std::sync::Arc;
+use std::time;
 
 use anyhow;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::Session;
-use std::cmp::max;
-use std::time;
 
 use crate::cdc_types::GenerationTimestamp;
 use crate::consumer::ConsumerFactory;

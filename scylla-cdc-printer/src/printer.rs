@@ -1,5 +1,6 @@
 use anyhow;
 use async_trait::async_trait;
+
 use scylla_cdc::consumer::{CDCRow, Consumer, ConsumerFactory};
 
 struct PrinterConsumer;
@@ -34,11 +35,11 @@ mod tests {
     use scylla::query::Query;
     use scylla::Session;
     use scylla::SessionBuilder;
-    use scylla_cdc::log_reader::CDCLogReader;
-    use scylla_cdc::test_utilities::unique_name;
     use tokio::time::sleep;
 
     use super::*;
+    use scylla_cdc::log_reader::CDCLogReader;
+    use scylla_cdc::test_utilities::unique_name;
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const TEST_TABLE: &str = "t";
