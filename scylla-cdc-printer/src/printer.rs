@@ -117,7 +117,7 @@ mod tests {
             start,
             end,
             Duration::from_millis(WINDOW_SIZE as u64),
-            chrono::Duration::milliseconds(SAFETY_INTERVAL),
+            Duration::from_millis(SAFETY_INTERVAL as u64),
             Duration::from_millis(SLEEP_INTERVAL as u64),
             Arc::new(PrinterConsumerFactory),
         );
