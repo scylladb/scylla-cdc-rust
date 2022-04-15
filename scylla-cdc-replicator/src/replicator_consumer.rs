@@ -140,7 +140,7 @@ impl ReplicatorConsumer {
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_update: &mut [&'a CqlValue],
         timestamp: i64,
         sentinel: CqlValue,
     ) -> anyhow::Result<()> {
@@ -148,7 +148,7 @@ impl ReplicatorConsumer {
         // Order of values: ttl, added elements, pk condition values.
 
         let deleted_set = Set(Vec::from(data.get_deleted_elements(column_name)));
-        let mut values_for_update: Vec<&CqlValue> = values_for_update.clone();
+        let mut values_for_update = values_for_update.to_vec();
 
         values_for_update[1] = value;
         values_for_update.insert(2, &deleted_set);
@@ -175,7 +175,7 @@ impl ReplicatorConsumer {
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_update: &mut [&'a CqlValue],
         values_for_delete: &[&CqlValue],
         timestamp: i64,
         sentinel: CqlValue,
@@ -210,7 +210,7 @@ impl ReplicatorConsumer {
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<Option<&'a CqlValue>>,
+        values_for_update: &mut [Option<&'a CqlValue>],
         pk_values: &[&CqlValue],
         timestamp: i64,
     ) -> anyhow::Result<()> {
@@ -272,7 +272,7 @@ impl ReplicatorConsumer {
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_update: &mut [&'a CqlValue],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         let empty_udt = CqlValue::UserDefinedType {
@@ -283,7 +283,7 @@ impl ReplicatorConsumer {
         let value = data.get_value(column_name).as_ref().unwrap_or(&empty_udt);
         // Order of values: ttl, added elements, pk condition values.
 
-        let mut values_for_update: Vec<&CqlValue> = values_for_update.clone();
+        let values_for_update = &mut values_for_update.to_vec();
         values_for_update[1] = value;
 
         let update_query = format!(
@@ -294,10 +294,10 @@ impl ReplicatorConsumer {
             cond = self.keys_cond,
         );
 
-        self.run_statement(Query::new(update_query), &values_for_update, timestamp)
+        self.run_statement(Query::new(update_query), values_for_update, timestamp)
             .await?;
 
-        self.delete_udt_elements(column_name, data, timestamp, value, &mut values_for_update)
+        self.delete_udt_elements(column_name, data, timestamp, value, values_for_update)
             .await?;
 
         Ok(())
@@ -309,7 +309,7 @@ impl ReplicatorConsumer {
         data: &'a CDCRow<'_>,
         timestamp: i64,
         value: &CqlValue,
-        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_update: &mut [&'a CqlValue],
     ) -> anyhow::Result<()> {
         let deleted_set = Vec::from(data.get_deleted_elements(column_name));
 
@@ -324,6 +324,7 @@ impl ReplicatorConsumer {
                 })
                 .join(",");
 
+            let values_for_update = &mut values_for_update.to_vec();
             values_for_update.remove(1);
 
             let remove_query = format!(
@@ -345,7 +346,7 @@ impl ReplicatorConsumer {
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_update: &mut [&'a CqlValue],
         values_for_delete: &[&CqlValue],
         timestamp: i64,
     ) -> anyhow::Result<()> {
@@ -396,7 +397,7 @@ impl ReplicatorConsumer {
         &self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut Vec<&'a CqlValue>,
+        values_for_update: &mut [&'a CqlValue],
         values_for_delete: &[&CqlValue],
         timestamp: i64,
     ) -> anyhow::Result<()> {
