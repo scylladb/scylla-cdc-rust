@@ -25,10 +25,14 @@ fn get_create_table_query() -> String {
     format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};", TEST_TABLE)
 }
 
-pub async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<String> {
+pub async fn create_test_db(
+    session: &Arc<Session>,
+    schema: &[String],
+    replication_factor: u8,
+) -> anyhow::Result<String> {
     let ks = unique_name();
     let mut create_keyspace_query = Query::new(format!(
-        "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 1}};", ks
+        "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': {}}};", ks, replication_factor
     ));
     create_keyspace_query.set_consistency(Consistency::All);
 
@@ -36,9 +40,10 @@ pub async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<String> {
     session.await_schema_agreement().await?;
     session.use_keyspace(&ks, false).await?;
 
-    // Create test table
-    let create_table_query = get_create_table_query();
-    session.query(create_table_query, &[]).await?;
+    // Create test tables
+    for query in schema {
+        session.query(query.clone(), &[]).await?;
+    }
     session.await_schema_agreement().await?;
     Ok(ks)
 }
@@ -62,11 +67,18 @@ fn get_uri() -> String {
     std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
 }
 
-pub async fn prepare_simple_db() -> anyhow::Result<(Arc<Session>, String)> {
+pub async fn prepare_db(
+    schema: &[String],
+    replication_factor: u8,
+) -> anyhow::Result<(Arc<Session>, String)> {
     let uri = get_uri();
     let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let shared_session = Arc::new(session);
 
-    let ks = create_test_db(&shared_session).await?;
+    let ks = create_test_db(&shared_session, schema, replication_factor).await?;
     Ok((shared_session, ks))
+}
+
+pub async fn prepare_simple_db() -> anyhow::Result<(Arc<Session>, String)> {
+    prepare_db(&[get_create_table_query()], 1).await
 }

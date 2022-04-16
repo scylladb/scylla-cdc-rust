@@ -263,9 +263,7 @@ async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utilities::unique_name;
-    use scylla::statement::Consistency;
-    use scylla::SessionBuilder;
+    use crate::test_utilities::prepare_db;
 
     use super::*;
 
@@ -315,31 +313,6 @@ mod tests {
         )
     }
 
-    // Creates test keyspace and tables if they don't exist.
-    // Test data was sampled from a local copy of database.
-    async fn create_test_db(session: &Session) {
-        let ks = unique_name();
-        let mut query = Query::new(format!(
-            "CREATE KEYSPACE IF NOT EXISTS {} WITH replication
-                = {{'class':'SimpleStrategy', 'replication_factor': 3}};",
-            ks
-        ));
-        query.set_consistency(Consistency::All);
-
-        session.query(query, &[]).await.unwrap();
-        session.await_schema_agreement().await.unwrap();
-        session.use_keyspace(ks, false).await.unwrap();
-
-        // Create test tables containing information about generations and streams.
-        for query in vec![
-            construct_generation_table_query(),
-            construct_stream_table_query(),
-        ] {
-            session.query(query, &[]).await.unwrap();
-        }
-        session.await_schema_agreement().await.unwrap();
-    }
-
     async fn insert_generation_timestamp(session: &Session, generation: i64) {
         let query = new_distributed_system_query(
             format!(
@@ -384,14 +357,18 @@ mod tests {
 
     // Create setup for tests.
     async fn setup() -> anyhow::Result<GenerationFetcher> {
-        let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-
-        let session = SessionBuilder::new().known_node(uri).build().await?;
-
-        create_test_db(&session).await;
+        let session = prepare_db(
+            &[
+                construct_generation_table_query(),
+                construct_stream_table_query(),
+            ],
+            3,
+        )
+        .await?
+        .0;
         populate_test_db(&session).await;
 
-        let generation_fetcher = GenerationFetcher::test_new(&Arc::new(session));
+        let generation_fetcher = GenerationFetcher::test_new(&session);
 
         Ok(generation_fetcher)
     }
