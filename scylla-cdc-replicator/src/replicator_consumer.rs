@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -27,6 +28,10 @@ struct PrecomputedQueries {
     insert_query: PreparedStatement,
     partition_delete_query: PreparedStatement,
     delete_query: PreparedStatement,
+    delete_value_queries: HashMap<String, PreparedStatement>,
+    overwrite_queries: HashMap<String, PreparedStatement>,
+    update_list_elements_queries: HashMap<String, PreparedStatement>,
+    update_map_or_set_elements_queries: HashMap<String, PreparedStatement>,
 }
 
 impl PrecomputedQueries {
@@ -81,11 +86,20 @@ impl PrecomputedQueries {
             keys_cond,
         };
 
+        let delete_value_queries = HashMap::new();
+        let overwrite_queries = HashMap::new();
+        let update_list_elements_queries = HashMap::new();
+        let update_map_or_set_elements_queries = HashMap::new();
+
         Ok(PrecomputedQueries {
             destination_table_params,
             insert_query,
             partition_delete_query,
             delete_query,
+            delete_value_queries,
+            overwrite_queries,
+            update_list_elements_queries,
+            update_map_or_set_elements_queries,
         })
     }
 
@@ -135,15 +149,28 @@ impl PrecomputedQueries {
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
-        run_statement(
+        let overwrite_query = match self.overwrite_queries.get_mut(column_name) {
+            Some(query) => query,
+            None => self
+                .overwrite_queries
+                .entry(column_name.to_string())
+                .or_insert(
+                    self.destination_table_params
+                        .dest_session
+                        .prepare(format!(
+                            "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
+                            self.destination_table_params.dest_keyspace_name,
+                            self.destination_table_params.dest_table_name,
+                            column_name,
+                            self.destination_table_params.keys_cond
+                        ))
+                        .await?,
+                ),
+        };
+
+        run_prepared_statement(
             &self.destination_table_params.dest_session,
-            Query::new(format!(
-                "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
-                self.destination_table_params.dest_keyspace_name,
-                self.destination_table_params.dest_table_name,
-                column_name,
-                self.destination_table_params.keys_cond
-            )),
+            overwrite_query.clone(),
             values,
             timestamp,
         )
@@ -161,15 +188,28 @@ impl PrecomputedQueries {
         // We have to use UPDATE with … = null syntax instead of a DELETE statement as
         // DELETE will use incorrect timestamp for non-frozen collections. More info in the documentation:
         // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
-        run_statement(
+        let delete_query = match self.delete_value_queries.get_mut(column_name) {
+            Some(query) => query,
+            None => self
+                .delete_value_queries
+                .entry(column_name.to_string())
+                .or_insert(
+                    self.destination_table_params
+                        .dest_session
+                        .prepare(format!(
+                            "UPDATE {}.{} SET {} = NULL WHERE {}",
+                            self.destination_table_params.dest_keyspace_name,
+                            self.destination_table_params.dest_table_name,
+                            column_name,
+                            self.destination_table_params.keys_cond
+                        ))
+                        .await?,
+                ),
+        };
+
+        run_prepared_statement(
             &self.destination_table_params.dest_session,
-            Query::new(format!(
-                "UPDATE {}.{} SET {} = NULL WHERE {}",
-                self.destination_table_params.dest_keyspace_name,
-                self.destination_table_params.dest_table_name,
-                column_name,
-                self.destination_table_params.keys_cond
-            )),
+            delete_query.clone(),
             values,
             timestamp,
         )
@@ -184,18 +224,32 @@ impl PrecomputedQueries {
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
-        run_statement(
+        let update_query = match self.update_map_or_set_elements_queries.get_mut(column_name) {
+            Some(query) => query,
+            None => {
+                self.update_map_or_set_elements_queries
+                    .entry(column_name.to_string())
+                    .or_insert(
+                        self.destination_table_params.dest_session.prepare(
+                            format!(
+                                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
+                                ks = self.destination_table_params.dest_keyspace_name,
+                                tbl = self.destination_table_params.dest_table_name,
+                                cond = self.destination_table_params.keys_cond,
+                                cname = column_name,
+                            )
+                        ).await?
+                    )
+            }
+        };
+
+        run_prepared_statement(
             &self.destination_table_params.dest_session,
-            Query::new(format!(
-                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                ks = self.destination_table_params.dest_keyspace_name,
-                tbl = self.destination_table_params.dest_table_name,
-                cond = self.destination_table_params.keys_cond,
-                cname = column_name,
-            )),
+            update_query.clone(),
             values,
             timestamp,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -212,15 +266,28 @@ impl PrecomputedQueries {
         // because we want to preserve the timestamps of the list elements.
         // More information:
         // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
-        run_statement(
+        let delete_query = match self.delete_value_queries.get_mut(column_name) {
+            Some(query) => query,
+            None => self
+                .delete_value_queries
+                .entry(column_name.to_string())
+                .or_insert(
+                    self.destination_table_params
+                        .dest_session
+                        .prepare(format!(
+                            "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
+                            ks = self.destination_table_params.dest_keyspace_name,
+                            tbl = self.destination_table_params.dest_table_name,
+                            col = column_name,
+                            cond = self.destination_table_params.keys_cond,
+                        ))
+                        .await?,
+                ),
+        };
+
+        run_prepared_statement(
             &self.destination_table_params.dest_session,
-            Query::new(format!(
-                "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
-                ks = self.destination_table_params.dest_keyspace_name,
-                tbl = self.destination_table_params.dest_table_name,
-                col = column_name,
-                cond = self.destination_table_params.keys_cond,
-            )),
+            delete_query.clone(),
             values,
             timestamp,
         )
@@ -237,15 +304,28 @@ impl PrecomputedQueries {
     ) -> anyhow::Result<()> {
         // We use the same query for updating and deleting values.
         // In case of deleting, we simply set the value to null.
-        let update_query = Query::new(format!(
-            "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
-            ks = self.destination_table_params.dest_keyspace_name,
-            tbl = self.destination_table_params.dest_table_name,
-            list = column_name,
-            cond = self.destination_table_params.keys_cond
-        ));
+        let update_query = match self.update_list_elements_queries.get_mut(column_name) {
+            Some(query) => query,
+            None => self
+                .update_list_elements_queries
+                .entry(column_name.to_string())
+                .or_insert(
+                    self.destination_table_params
+                        .dest_session
+                        .prepare(
+                            format!(
+                                "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
+                                ks = self.destination_table_params.dest_keyspace_name,
+                                tbl = self.destination_table_params.dest_table_name,
+                                list = column_name,
+                                cond = self.destination_table_params.keys_cond
+                            )
+                        )
+                        .await?,
+                ),
+        };
 
-        run_statement(
+        run_prepared_statement(
             &self.destination_table_params.dest_session,
             update_query.clone(),
             values,
@@ -262,17 +342,28 @@ impl PrecomputedQueries {
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
-        let update_query = format!(
-            "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
-            ks = self.destination_table_params.dest_keyspace_name,
-            tbl = self.destination_table_params.dest_table_name,
-            cname = column_name,
-            cond = self.destination_table_params.keys_cond,
-        );
+        let update_query = match self.overwrite_queries.get_mut(column_name) {
+            Some(query) => query,
+            None => self
+                .overwrite_queries
+                .entry(column_name.to_string())
+                .or_insert(
+                    self.destination_table_params
+                        .dest_session
+                        .prepare(format!(
+                            "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
+                            ks = self.destination_table_params.dest_keyspace_name,
+                            tbl = self.destination_table_params.dest_table_name,
+                            cname = column_name,
+                            cond = self.destination_table_params.keys_cond,
+                        ))
+                        .await?,
+                ),
+        };
 
-        run_statement(
+        run_prepared_statement(
             &self.destination_table_params.dest_session,
-            Query::new(update_query),
+            update_query.clone(),
             values,
             timestamp,
         )
