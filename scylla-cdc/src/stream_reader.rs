@@ -111,16 +111,13 @@ impl StreamReader {
 mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
-    use scylla::batch::Consistency;
     use scylla::query::Query;
-    use scylla::SessionBuilder;
     use tokio::sync::Mutex;
 
     use super::*;
-    use crate::test_utilities::unique_name;
+    use crate::test_utilities::{populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
 
     const SECOND_IN_MILLIS: u64 = 1_000;
-    const TEST_TABLE: &str = "t";
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
     const WINDOW_SIZE: u64 = SECOND_IN_MILLIS / 10 * 3;
     const SAFETY_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
@@ -168,55 +165,6 @@ mod tests {
         Ok(reader)
     }
 
-    fn get_create_table_query() -> String {
-        format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};", TEST_TABLE)
-    }
-
-    async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<String> {
-        let ks = unique_name();
-
-        let mut create_keyspace_query = Query::new(format!(
-            "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 1}};",
-            ks
-        ));
-        create_keyspace_query.set_consistency(Consistency::All);
-
-        session.query(create_keyspace_query, &[]).await?;
-        session.await_schema_agreement().await?;
-        session.use_keyspace(&ks, false).await?;
-
-        // Create test table
-        let create_table_query = get_create_table_query();
-        session.query(create_table_query, &[]).await?;
-        session.await_schema_agreement().await?;
-        Ok(ks)
-    }
-
-    async fn prepare_db() -> anyhow::Result<(Arc<Session>, String)> {
-        let uri = get_uri();
-        let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
-        let shared_session = Arc::new(session);
-
-        let ks = create_test_db(&shared_session).await?;
-        Ok((shared_session, ks))
-    }
-
-    async fn populate_db_with_pk(session: &Arc<Session>, pk: u32) -> anyhow::Result<()> {
-        for i in 0..3 {
-            session
-                .query(
-                    format!(
-                        "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, 'val{}', 'static{}');",
-                        TEST_TABLE, pk, i, i, i
-                    ),
-                    &[],
-                )
-                .await?;
-        }
-
-        Ok(())
-    }
-
     async fn get_cdc_stream_id(session: &Arc<Session>) -> anyhow::Result<Vec<StreamID>> {
         let query_stream_id = format!(
             "SELECT DISTINCT \"cdc$stream_id\" FROM {}_scylla_cdc_log;",
@@ -235,10 +183,6 @@ mod tests {
         }
 
         Ok(stream_ids_vec)
-    }
-
-    fn get_uri() -> String {
-        std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
     }
 
     type TestResult = (i32, String, i32, String);
@@ -263,14 +207,14 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_multiple_stream_id() {
-        let (shared_session, ks) = prepare_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db().await.unwrap();
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;
-        populate_db_with_pk(&shared_session, partition_key_1)
+        populate_simple_db_with_pk(&shared_session, partition_key_1)
             .await
             .unwrap();
-        populate_db_with_pk(&shared_session, partition_key_2)
+        populate_simple_db_with_pk(&shared_session, partition_key_2)
             .await
             .unwrap();
 
@@ -319,10 +263,10 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_one_stream_id() {
-        let (shared_session, ks) = prepare_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db().await.unwrap();
 
         let partition_key = 0;
-        populate_db_with_pk(&shared_session, partition_key)
+        populate_simple_db_with_pk(&shared_session, partition_key)
             .await
             .unwrap();
 
@@ -351,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_set_upper_timestamp_in_fetch_cdc() {
-        let (shared_session, ks) = prepare_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db().await.unwrap();
 
         let mut insert_before_upper_timestamp_query = Query::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
