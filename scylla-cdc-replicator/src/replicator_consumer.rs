@@ -89,34 +89,54 @@ impl PrecomputedQueries {
         })
     }
 
-    async fn delete_partition(&self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
-        self.run_prepared_statement(self.partition_delete_query.clone(), values, timestamp)
-            .await?;
+    async fn delete_partition(
+        &mut self,
+        values: &[impl Value],
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
+        run_prepared_statement(
+            &self.destination_table_params.dest_session,
+            self.partition_delete_query.clone(),
+            values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn insert_value(&self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
-        self.run_prepared_statement(self.insert_query.clone(), values, timestamp)
-            .await?;
+    async fn insert_value(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+        run_prepared_statement(
+            &self.destination_table_params.dest_session,
+            self.insert_query.clone(),
+            values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
 
-    async fn delete_row(&self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
-        self.run_prepared_statement(self.delete_query.clone(), values, timestamp)
-            .await?;
+    async fn delete_row(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+        run_prepared_statement(
+            &self.destination_table_params.dest_session,
+            self.delete_query.clone(),
+            values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
 
     async fn overwrite_value(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
-        self.run_statement(
+        run_statement(
+            &self.destination_table_params.dest_session,
             Query::new(format!(
                 "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
                 self.destination_table_params.dest_keyspace_name,
@@ -133,7 +153,7 @@ impl PrecomputedQueries {
     }
 
     async fn delete_value(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         column_name: &str,
@@ -141,7 +161,8 @@ impl PrecomputedQueries {
         // We have to use UPDATE with … = null syntax instead of a DELETE statement as
         // DELETE will use incorrect timestamp for non-frozen collections. More info in the documentation:
         // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
-        self.run_statement(
+        run_statement(
+            &self.destination_table_params.dest_session,
             Query::new(format!(
                 "UPDATE {}.{} SET {} = NULL WHERE {}",
                 self.destination_table_params.dest_keyspace_name,
@@ -158,12 +179,13 @@ impl PrecomputedQueries {
     }
 
     async fn update_map_or_set_elements(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
-        self.run_statement(
+        run_statement(
+            &self.destination_table_params.dest_session,
             Query::new(format!(
                 "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
                 ks = self.destination_table_params.dest_keyspace_name,
@@ -179,7 +201,7 @@ impl PrecomputedQueries {
     }
 
     async fn delete_list_value(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         column_name: &str,
@@ -190,7 +212,8 @@ impl PrecomputedQueries {
         // because we want to preserve the timestamps of the list elements.
         // More information:
         // https://docs.scylladb.com/using-scylla/cdc/cdc-advanced-types/#collection-wide-tombstones-and-timestamps
-        self.run_statement(
+        run_statement(
+            &self.destination_table_params.dest_session,
             Query::new(format!(
                 "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
                 ks = self.destination_table_params.dest_keyspace_name,
@@ -207,7 +230,7 @@ impl PrecomputedQueries {
     }
 
     async fn update_list_elements(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         column_name: &str,
@@ -222,14 +245,19 @@ impl PrecomputedQueries {
             cond = self.destination_table_params.keys_cond
         ));
 
-        self.run_statement(update_query.clone(), values, timestamp)
-            .await?;
+        run_statement(
+            &self.destination_table_params.dest_session,
+            update_query.clone(),
+            values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
 
     async fn update_udt_elements(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         column_name: &str,
@@ -242,14 +270,19 @@ impl PrecomputedQueries {
             cond = self.destination_table_params.keys_cond,
         );
 
-        self.run_statement(Query::new(update_query), values, timestamp)
-            .await?;
+        run_statement(
+            &self.destination_table_params.dest_session,
+            Query::new(update_query),
+            values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
 
     async fn delete_udt_elements(
-        &self,
+        &mut self,
         values: &[impl Value],
         timestamp: i64,
         removed_fields: &str,
@@ -262,41 +295,40 @@ impl PrecomputedQueries {
             cond = self.destination_table_params.keys_cond,
         );
 
-        self.run_statement(Query::new(remove_query), values, timestamp)
-            .await?;
+        run_statement(
+            &self.destination_table_params.dest_session,
+            Query::new(remove_query),
+            values,
+            timestamp,
+        )
+        .await?;
 
         Ok(())
     }
+}
 
-    async fn run_prepared_statement(
-        &self,
-        mut query: PreparedStatement,
-        values: &[impl Value],
-        timestamp: i64,
-    ) -> anyhow::Result<()> {
-        query.set_timestamp(Some(timestamp));
-        self.destination_table_params
-            .dest_session
-            .execute(&query, values)
-            .await?;
+async fn run_prepared_statement(
+    dest_session: &Arc<Session>,
+    mut query: PreparedStatement,
+    values: &[impl Value],
+    timestamp: i64,
+) -> anyhow::Result<()> {
+    query.set_timestamp(Some(timestamp));
+    dest_session.execute(&query, values).await?;
 
-        Ok(())
-    }
+    Ok(())
+}
 
-    async fn run_statement(
-        &self,
-        mut query: Query,
-        values: &[impl Value],
-        timestamp: i64,
-    ) -> anyhow::Result<()> {
-        query.set_timestamp(Some(timestamp));
-        self.destination_table_params
-            .dest_session
-            .query(query, values)
-            .await?;
+async fn run_statement(
+    dest_session: &Arc<Session>,
+    mut query: Query,
+    values: &[impl Value],
+    timestamp: i64,
+) -> anyhow::Result<()> {
+    query.set_timestamp(Some(timestamp));
+    dest_session.query(query, values).await?;
 
-        Ok(())
-    }
+    Ok(())
 }
 
 struct SourceTableData {
@@ -351,7 +383,7 @@ impl ReplicatorConsumer {
         (data.time.to_timestamp().unwrap().to_unix_nanos() / NANOS_IN_MILLIS) as i64
     }
 
-    async fn delete_partition(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+    async fn delete_partition(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let timestamp = ReplicatorConsumer::get_timestamp(&data);
         let partition_keys_iter = self.source_table_data.table_schema.partition_key.iter();
         let values = partition_keys_iter
@@ -365,13 +397,13 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
-    async fn update(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+    async fn update(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         self.update_or_insert(data, false).await?;
 
         Ok(())
     }
 
-    async fn insert(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+    async fn insert(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         self.update_or_insert(data, true).await?;
 
         Ok(())
@@ -381,7 +413,7 @@ impl ReplicatorConsumer {
     // using v = v + {} and v = v - {} cql syntax to non-frozen map or set.
     // Chained operations are supported.
     async fn update_map_or_set_elements<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [&'a CqlValue],
@@ -407,7 +439,7 @@ impl ReplicatorConsumer {
 
     // Recreates INSERT/DELETE/UPDATE statement on non-frozen map or set.
     async fn update_map_or_set<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [&'a CqlValue],
@@ -442,7 +474,7 @@ impl ReplicatorConsumer {
 
     // Recreates INSERT/DELETE/UPDATE statement on non-frozen list.
     async fn update_list<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [Option<&'a CqlValue>],
@@ -481,7 +513,7 @@ impl ReplicatorConsumer {
 
     // Function replicates adding and deleting elements in udt
     async fn update_udt_elements<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [&'a CqlValue],
@@ -509,7 +541,7 @@ impl ReplicatorConsumer {
     }
 
     async fn delete_udt_elements<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         timestamp: i64,
@@ -541,7 +573,7 @@ impl ReplicatorConsumer {
     }
 
     async fn update_udt<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [&'a CqlValue],
@@ -581,7 +613,7 @@ impl ReplicatorConsumer {
     }
 
     // Recreates row deletion.
-    async fn delete_row(&self, data: CDCRow<'_>) -> anyhow::Result<()> {
+    async fn delete_row(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
         self.precomputed_queries
             .delete_row(&values, timestamp)
@@ -592,7 +624,7 @@ impl ReplicatorConsumer {
 
     // Recreates INSERT/UPDATE/DELETE statement for single column in a row.
     async fn overwrite_column<'a>(
-        &self,
+        &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [&'a CqlValue],
@@ -614,7 +646,7 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
-    async fn update_or_insert(&self, data: CDCRow<'_>, is_insert: bool) -> anyhow::Result<()> {
+    async fn update_or_insert(&mut self, data: CDCRow<'_>, is_insert: bool) -> anyhow::Result<()> {
         let (ttl, timestamp, values) = self.get_common_cdc_row_data(&data);
 
         if is_insert {
@@ -636,7 +668,7 @@ impl ReplicatorConsumer {
         values_for_list_update.extend([Some(&ttl), None, None]);
         values_for_list_update.extend(values.iter().map(|x| Some(*x)));
 
-        for column_name in &self.source_table_data.non_key_columns {
+        for column_name in &self.source_table_data.non_key_columns.clone() {
             match &self
                 .source_table_data
                 .table_schema
