@@ -117,10 +117,10 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
+    use crate::test_utilities::unique_name;
 
     const SECOND_IN_MICRO: i64 = 1_000_000;
     const SECOND_IN_MILLIS: i64 = 1_000;
-    const TEST_KEYSPACE: &str = "stream_reader_test";
     const TEST_TABLE: &str = "t";
     const SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
     const WINDOW_SIZE: i64 = SECOND_IN_MILLIS / 10 * 3;
@@ -171,48 +171,45 @@ mod tests {
     }
 
     fn get_create_table_query() -> String {
-        format!("CREATE TABLE IF NOT EXISTS {}.{} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};",
-                TEST_KEYSPACE,
-                TEST_TABLE
-        )
+        format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};", TEST_TABLE)
     }
 
-    async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<()> {
+    async fn create_test_db(session: &Arc<Session>) -> anyhow::Result<String> {
+        let ks = unique_name();
+
         let mut create_keyspace_query = Query::new(format!(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 1}};",
-            TEST_KEYSPACE
+            ks
         ));
         create_keyspace_query.set_consistency(Consistency::All);
 
         session.query(create_keyspace_query, &[]).await?;
         session.await_schema_agreement().await?;
+        session.use_keyspace(&ks, false).await?;
 
         // Create test table
         let create_table_query = get_create_table_query();
         session.query(create_table_query, &[]).await?;
         session.await_schema_agreement().await?;
+        Ok(ks)
+    }
 
-        let table_name_under_keyspace = format!("{}.{}", TEST_KEYSPACE, TEST_TABLE);
-        session
-            .query(format!("TRUNCATE {};", table_name_under_keyspace), &[])
-            .await?;
-        session
-            .query(
-                format!("TRUNCATE {}_scylla_cdc_log;", table_name_under_keyspace),
-                &[],
-            )
-            .await?;
-        Ok(())
+    async fn prepare_db() -> anyhow::Result<(Arc<Session>, String)> {
+        let uri = get_uri();
+        let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
+        let shared_session = Arc::new(session);
+
+        let ks = create_test_db(&shared_session).await?;
+        Ok((shared_session, ks))
     }
 
     async fn populate_db_with_pk(session: &Arc<Session>, pk: u32) -> anyhow::Result<()> {
-        let table_name_under_keyspace = format!("{}.{}", TEST_KEYSPACE, TEST_TABLE);
         for i in 0..3 {
             session
                 .query(
                     format!(
                         "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, 'val{}', 'static{}');",
-                        table_name_under_keyspace, pk, i, i, i
+                        TEST_TABLE, pk, i, i, i
                     ),
                     &[],
                 )
@@ -223,10 +220,9 @@ mod tests {
     }
 
     async fn get_cdc_stream_id(session: &Arc<Session>) -> anyhow::Result<Vec<StreamID>> {
-        let table_name_under_keyspace = format!("{}.{}", TEST_KEYSPACE, TEST_TABLE);
         let query_stream_id = format!(
             "SELECT DISTINCT \"cdc$stream_id\" FROM {}_scylla_cdc_log;",
-            table_name_under_keyspace
+            TEST_TABLE
         );
 
         let mut rows = session
@@ -269,13 +265,10 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_multiple_stream_id() {
-        let uri = get_uri();
-        let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
-        let shared_session = Arc::new(session);
+        let (shared_session, ks) = prepare_db().await.unwrap();
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;
-        create_test_db(&shared_session).await.unwrap();
         populate_db_with_pk(&shared_session, partition_key_1)
             .await
             .unwrap();
@@ -296,7 +289,7 @@ mod tests {
         });
 
         cdc_reader
-            .fetch_cdc(TEST_KEYSPACE.to_string(), TEST_TABLE.to_string(), consumer)
+            .fetch_cdc(ks, TEST_TABLE.to_string(), consumer)
             .await
             .unwrap();
 
@@ -331,12 +324,9 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_one_stream_id() {
-        let uri = get_uri();
-        let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
-        let shared_session = Arc::new(session);
+        let (shared_session, ks) = prepare_db().await.unwrap();
 
         let partition_key = 0;
-        create_test_db(&shared_session).await.unwrap();
         populate_db_with_pk(&shared_session, partition_key)
             .await
             .unwrap();
@@ -354,7 +344,7 @@ mod tests {
         });
 
         cdc_reader
-            .fetch_cdc(TEST_KEYSPACE.to_string(), TEST_TABLE.to_string(), consumer)
+            .fetch_cdc(ks, TEST_TABLE.to_string(), consumer)
             .await
             .unwrap();
 
@@ -369,15 +359,11 @@ mod tests {
 
     #[tokio::test]
     async fn check_set_upper_timestamp_in_fetch_cdc() {
-        let uri = get_uri();
-        let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
-        let shared_session = Arc::new(session);
+        let (shared_session, ks) = prepare_db().await.unwrap();
 
-        create_test_db(&shared_session).await.unwrap();
-        let table_name_under_keyspace = format!("{}.{}", TEST_KEYSPACE, TEST_TABLE);
         let mut insert_before_upper_timestamp_query = Query::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
-            table_name_under_keyspace, 0, 0, "val0", "static0"
+            TEST_TABLE, 0, 0, "val0", "static0"
         ));
         insert_before_upper_timestamp_query.set_timestamp(Some(
             chrono::Local::now().timestamp_millis() * 1000_i64 - SECOND_IN_MICRO,
@@ -396,7 +382,7 @@ mod tests {
 
         let mut insert_after_upper_timestamp_query = Query::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
-            table_name_under_keyspace, 0, 1, "val1", "static1"
+            TEST_TABLE, 0, 1, "val1", "static1"
         ));
         insert_after_upper_timestamp_query.set_timestamp(Some(
             chrono::Local::now().timestamp_millis() * 1000_i64 + SECOND_IN_MICRO,
@@ -411,7 +397,7 @@ mod tests {
         });
 
         cdc_reader
-            .fetch_cdc(TEST_KEYSPACE.to_string(), TEST_TABLE.to_string(), consumer)
+            .fetch_cdc(ks, TEST_TABLE.to_string(), consumer)
             .await
             .unwrap();
 

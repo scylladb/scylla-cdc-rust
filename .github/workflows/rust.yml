@@ -29,5 +29,4 @@ jobs:
       - name: Build
         run: cargo build --verbose
       - name: Run tests
-        # test threads must be one because else database tests will run in parallel and will result in flaky tests
-        run: cargo test --verbose -- --test-threads=1
+        run: cargo test --verbose

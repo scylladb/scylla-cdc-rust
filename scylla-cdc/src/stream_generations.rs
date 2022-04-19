@@ -263,14 +263,14 @@ async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow
 
 #[cfg(test)]
 mod tests {
+    use crate::test_utilities::unique_name;
     use scylla::statement::Consistency;
     use scylla::SessionBuilder;
 
     use super::*;
 
-    const TEST_STREAM_TABLE: &str = "stream_generations_test.cdc_streams_descriptions_v2";
-    const TEST_GENERATION_TABLE: &str = "stream_generations_test.cdc_generation_timestamps";
-    const TEST_KEYSPACE: &str = "stream_generations_test";
+    const TEST_STREAM_TABLE: &str = "cdc_streams_descriptions_v2";
+    const TEST_GENERATION_TABLE: &str = "cdc_generation_timestamps";
     const GENERATION_NEW_MILLISECONDS: i64 = 1635882326384;
     const GENERATION_OLD_MILLISECONDS: i64 = 1635882224341;
     const TEST_STREAM_1: &str = "0x7fb9f781956cea08c651295720000001";
@@ -318,15 +318,17 @@ mod tests {
     // Creates test keyspace and tables if they don't exist.
     // Test data was sampled from a local copy of database.
     async fn create_test_db(session: &Session) {
+        let ks = unique_name();
         let mut query = Query::new(format!(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH replication
                 = {{'class':'SimpleStrategy', 'replication_factor': 3}};",
-            TEST_KEYSPACE
+            ks
         ));
         query.set_consistency(Consistency::All);
 
         session.query(query, &[]).await.unwrap();
         session.await_schema_agreement().await.unwrap();
+        session.use_keyspace(ks, false).await.unwrap();
 
         // Create test tables containing information about generations and streams.
         for query in vec![
@@ -336,17 +338,6 @@ mod tests {
             session.query(query, &[]).await.unwrap();
         }
         session.await_schema_agreement().await.unwrap();
-
-        // Delete all leftovers from previous tests.
-        for table in vec![
-            TEST_STREAM_TABLE.to_string(),
-            TEST_GENERATION_TABLE.to_string(),
-        ] {
-            session
-                .query(format!("TRUNCATE {};", table), &[])
-                .await
-                .unwrap();
-        }
     }
 
     // Populate test tables with given data.
