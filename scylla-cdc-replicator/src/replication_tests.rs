@@ -141,7 +141,7 @@ mod tests {
         ks_src: &str,
         ks_dst: &str,
         name: &str,
-        last_read: &mut u64,
+        last_read: &mut (u64, i32),
     ) -> anyhow::Result<()> {
         let result = session
             .query(
@@ -173,8 +173,9 @@ mod tests {
         for log in result.rows.unwrap_or_default() {
             let cdc_row = CDCRow::from_row(log, &schema);
             let time = cdc_row.time.to_timestamp().unwrap().to_unix_nanos();
-            if time > *last_read {
-                *last_read = time;
+            let batch_seq_no = cdc_row.batch_seq_no;
+            if (time, batch_seq_no) > *last_read {
+                *last_read = (time, batch_seq_no);
                 consumer.consume_cdc(cdc_row).await?;
             }
         }
@@ -409,7 +410,7 @@ mod tests {
         setup_udts(&session, &ks_src, &ks_dst, &udt_schemas).await?;
         setup_tables(&session, &ks_src, &ks_dst, &table_schema).await?;
         session.use_keyspace(&ks_src, false).await?;
-        let mut last_read = 0;
+        let mut last_read = (0, 0);
 
         for operation in operations {
             session.query(operation, []).await?;
@@ -888,7 +889,7 @@ mod tests {
             .unwrap();
 
         session.use_keyspace(&ks_src, false).await.unwrap();
-        let mut last_read = 0;
+        let mut last_read = (0, 0);
 
         for operation in operations {
             session.query(operation, []).await.unwrap();
