@@ -1,5 +1,6 @@
 use anyhow;
 use async_trait::async_trait;
+
 use scylla_cdc::consumer::{CDCRow, Consumer, ConsumerFactory};
 
 struct PrinterConsumer;
@@ -28,23 +29,33 @@ impl ConsumerFactory for PrinterConsumerFactory {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time;
 
     use scylla::batch::Consistency;
     use scylla::query::Query;
     use scylla::Session;
     use scylla::SessionBuilder;
-    use scylla_cdc::log_reader::CDCLogReader;
-    use scylla_cdc::test_utilities::unique_name;
     use tokio::time::sleep;
 
     use super::*;
+    use scylla_cdc::log_reader::CDCLogReader;
+    use scylla_cdc::test_utilities::unique_name;
 
-    const SECOND_IN_MILLIS: i64 = 1_000;
+    const SECOND_IN_MILLIS: u64 = 1_000;
     const TEST_TABLE: &str = "t";
-    const SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
-    const WINDOW_SIZE: i64 = SECOND_IN_MILLIS / 10 * 3;
-    const SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS / 10;
+    const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
+    const WINDOW_SIZE: u64 = SECOND_IN_MILLIS / 10 * 3;
+    const SAFETY_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
+
+    trait ToTimestamp {
+        fn to_timestamp(&self) -> chrono::Duration;
+    }
+
+    impl<Tz: chrono::TimeZone> ToTimestamp for chrono::DateTime<Tz> {
+        fn to_timestamp(&self) -> chrono::Duration {
+            chrono::Duration::milliseconds(self.timestamp_millis())
+        }
+    }
 
     fn get_create_table_query() -> String {
         format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};",
@@ -88,12 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cdc_log_printer() {
-        let start = chrono::Duration::from_std(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap(),
-        )
-        .unwrap();
+        let start = chrono::Local::now().to_timestamp();
         let end = start + chrono::Duration::seconds(2);
 
         let uri = std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
@@ -116,13 +122,13 @@ mod tests {
             TEST_TABLE.to_string(),
             start,
             end,
-            chrono::Duration::milliseconds(WINDOW_SIZE),
-            chrono::Duration::milliseconds(SAFETY_INTERVAL),
-            Duration::from_millis(SLEEP_INTERVAL as u64),
+            time::Duration::from_millis(WINDOW_SIZE),
+            time::Duration::from_millis(SAFETY_INTERVAL),
+            time::Duration::from_millis(SLEEP_INTERVAL),
             Arc::new(PrinterConsumerFactory),
         );
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(time::Duration::from_secs(2)).await;
 
         cdc_log_printer.stop();
     }
