@@ -388,11 +388,10 @@ mod tests {
     /// Function that tests replication process.
     /// Different tests in the same cluster must have different table names.
     async fn test_replication(
-        node_uri: &str,
         schema: TestTableSchema<'_>,
         operations: Vec<TestOperation<'_>>,
     ) -> anyhow::Result<()> {
-        test_replication_with_udt(node_uri, schema, vec![], operations).await?;
+        test_replication_with_udt(schema, vec![], operations).await?;
 
         Ok(())
     }
@@ -400,12 +399,11 @@ mod tests {
     /// Function that tests replication process with a user-defined type
     /// Different tests in the same cluster must have different table names.
     async fn test_replication_with_udt(
-        node_uri: &str,
         table_schema: TestTableSchema<'_>,
         udt_schemas: Vec<TestUDTSchema<'_>>,
         operations: Vec<TestOperation<'_>>,
     ) -> anyhow::Result<()> {
-        let session = Arc::new(SessionBuilder::new().known_node(node_uri).build().await?);
+        let session = Arc::new(SessionBuilder::new().known_node(get_uri()).build().await?);
         let (ks_src, ks_dst) = setup_keyspaces(&session).await?;
         setup_udts(&session, &ks_src, &ks_dst, &udt_schemas).await?;
         setup_tables(&session, &ks_src, &ks_dst, &table_schema).await?;
@@ -520,9 +518,7 @@ mod tests {
             "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (3, 2, 1, false)",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -540,9 +536,7 @@ mod tests {
             "DELETE v1 FROM SIMPLE_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -564,7 +558,7 @@ mod tests {
             "UPDATE SIMPLE_UDT_TEST SET ut_col = null WHERE pk = 0 AND ck = 0",
         ];
 
-        test_replication_with_udt(&get_uri(), table_schema, udt_schemas, operations)
+        test_replication_with_udt(table_schema, udt_schemas, operations)
             .await
             .unwrap();
     }
@@ -585,9 +579,7 @@ mod tests {
             "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (5, 6, {100: 100, 200: 200, 300: 300}, {400: true, 500: false})",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -605,9 +597,7 @@ mod tests {
             "DELETE v1 FROM MAPS_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -626,9 +616,7 @@ mod tests {
             "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {10} WHERE pk = 10 AND ck = 20",
             "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {1}, v1 = v1 + {2137: -2137} WHERE pk = 1 AND ck = 2",
         ];
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -649,9 +637,7 @@ mod tests {
             "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (-1, -2, 30, true)",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -669,9 +655,7 @@ mod tests {
             "INSERT INTO SET_TEST (pk, ck, v) VALUES (3, 4, {1, 1})",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -688,9 +672,7 @@ mod tests {
             "UPDATE SET_TEST SET v = {1, 2} WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -707,9 +689,7 @@ mod tests {
             "DELETE v FROM SET_TEST WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -728,9 +708,7 @@ mod tests {
             "UPDATE SET_TEST SET v = v - {10}, v = v + {200} WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -748,9 +726,7 @@ mod tests {
             "DELETE FROM PARTITION_DELETE WHERE pk = 0",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -773,7 +749,7 @@ mod tests {
             "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (3, 4, {int_val: 3, bool_val: true})",
         ];
 
-        test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
+        test_replication_with_udt(schema, udt_schemas, operations)
             .await
             .unwrap();
     }
@@ -793,9 +769,7 @@ mod tests {
             "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = 0 AND pk2 = 2",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -813,9 +787,7 @@ mod tests {
             "UPDATE LIST_ELEMENTS_UPDATE SET v = v - [1, 5] WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -838,7 +810,7 @@ mod tests {
             "UPDATE TEST_UDT_UPDATE SET v = null WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
+        test_replication_with_udt(schema, udt_schemas, operations)
             .await
             .unwrap();
     }
@@ -857,9 +829,7 @@ mod tests {
             "UPDATE LIST_REPLACE SET v = [2, 4, 6, 8] WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -948,9 +918,7 @@ mod tests {
             "DELETE v4 FROM COMPARE_TIME WHERE pk = 4 AND CK = 4",
         ];
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 
     #[tokio::test]
@@ -974,7 +942,7 @@ mod tests {
             "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null, v.bool_val = false WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
+        test_replication_with_udt(schema, udt_schemas, operations)
             .await
             .unwrap();
     }
@@ -1001,8 +969,6 @@ mod tests {
             "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2, ck3) > (3, 3, 3)",
         ]);
 
-        test_replication(&get_uri(), schema, operations)
-            .await
-            .unwrap();
+        test_replication(schema, operations).await.unwrap();
     }
 }
