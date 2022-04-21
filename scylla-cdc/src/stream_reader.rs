@@ -56,7 +56,7 @@ impl StreamReader {
             "SELECT * FROM {}.{}_scylla_cdc_log \
             WHERE \"cdc$stream_id\" in ? \
             AND \"cdc$time\" >= minTimeuuid(?) \
-            AND \"cdc$time\" < maxTimeuuid(?)",
+            AND \"cdc$time\" < minTimeuuid(?)",
             keyspace, table_name
         );
         let query_base = self.session.prepare(query).await?;
