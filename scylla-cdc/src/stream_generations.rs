@@ -340,29 +340,33 @@ mod tests {
         session.await_schema_agreement().await.unwrap();
     }
 
+    async fn insert_generation_timestamp(session: &Session, generation: i64) {
+        let query = new_distributed_system_query(
+            format!(
+                "INSERT INTO {} (key, time, expired) VALUES ('timestamps', ?, NULL);",
+                TEST_GENERATION_TABLE
+            ),
+            session,
+        )
+        .await
+        .unwrap();
+
+        session
+            .query(
+                query,
+                (Timestamp(chrono::Duration::milliseconds(generation)),),
+            )
+            .await
+            .unwrap();
+    }
+
     // Populate test tables with given data.
     async fn populate_test_db(session: &Session) {
         let stream_generation =
             Timestamp(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS));
 
         for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
-            let query = new_distributed_system_query(
-                format!(
-                    "INSERT INTO {} (key, time, expired) VALUES ('timestamps', ?, NULL);",
-                    TEST_GENERATION_TABLE
-                ),
-                session,
-            )
-            .await
-            .unwrap();
-
-            session
-                .query(
-                    query,
-                    (Timestamp(chrono::Duration::milliseconds(*generation)),),
-                )
-                .await
-                .unwrap();
+            insert_generation_timestamp(session, *generation).await;
         }
 
         let query = new_distributed_system_query(
