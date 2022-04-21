@@ -430,6 +430,10 @@ struct SourceTableData {
 pub(crate) struct ReplicatorConsumer {
     source_table_data: SourceTableData,
     precomputed_queries: PrecomputedQueries,
+
+    // Stores data for left side range delete while waiting for its right counterpart.
+    left_range_included: bool,
+    left_range_values: Vec<Option<CqlValue>>,
 }
 
 impl ReplicatorConsumer {
@@ -466,6 +470,8 @@ impl ReplicatorConsumer {
         ReplicatorConsumer {
             source_table_data,
             precomputed_queries,
+            left_range_included: false,
+            left_range_values: vec![],
         }
     }
 
@@ -507,18 +513,18 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
         timestamp: i64,
         sentinel: CqlValue,
     ) -> anyhow::Result<()> {
-        let value = data.get_value(column_name).as_ref().unwrap_or(&sentinel);
+        let value = Some(data.get_value(column_name).as_ref().unwrap_or(&sentinel));
         // Order of values: ttl, added elements, pk condition values.
 
         let deleted_set = Set(Vec::from(data.get_deleted_elements(column_name)));
         let mut values_for_update = values_for_update.to_vec();
 
         values_for_update[1] = value;
-        values_for_update.insert(2, &deleted_set);
+        values_for_update.insert(2, Some(&deleted_set));
         // New order of values: ttl, added elements, deleted elements, pk condition values.
 
         self.precomputed_queries
@@ -533,8 +539,8 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
-        values_for_delete: &[&CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_delete: &[Option<&CqlValue>],
         timestamp: i64,
         sentinel: CqlValue,
     ) -> anyhow::Result<()> {
@@ -569,7 +575,7 @@ impl ReplicatorConsumer {
         column_name: &str,
         data: &'a CDCRow<'_>,
         values_for_update: &mut [Option<&'a CqlValue>],
-        pk_values: &[&CqlValue],
+        pk_values: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         if data.is_value_deleted(column_name) {
@@ -607,7 +613,7 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         let empty_udt = CqlValue::UserDefinedType {
@@ -619,7 +625,7 @@ impl ReplicatorConsumer {
         // Order of values: ttl, added elements, pk condition values.
 
         let values_for_update = &mut values_for_update.to_vec();
-        values_for_update[1] = value;
+        values_for_update[1] = Some(value);
 
         self.precomputed_queries
             .update_udt_elements(values_for_update, timestamp, column_name)
@@ -637,7 +643,7 @@ impl ReplicatorConsumer {
         data: &'a CDCRow<'_>,
         timestamp: i64,
         value: &CqlValue,
-        values_for_update: &mut [&'a CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
     ) -> anyhow::Result<()> {
         let deleted_set = Vec::from(data.get_deleted_elements(column_name));
 
@@ -667,8 +673,8 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
-        values_for_delete: &[&CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_delete: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
         if data.is_value_deleted(column_name) {
@@ -690,15 +696,139 @@ impl ReplicatorConsumer {
         Ok(())
     }
 
+    fn delete_row_range_left(&mut self, mut data: CDCRow<'_>, included: bool) {
+        self.left_range_included = included;
+        self.left_range_values =
+            take_clustering_keys_values(&self.source_table_data.table_schema, &mut data);
+    }
+
+    async fn delete_row_range_right(
+        &mut self,
+        data: CDCRow<'_>,
+        right_included: bool,
+    ) -> anyhow::Result<()> {
+        let table_schema = &self.source_table_data.table_schema;
+        if table_schema.clustering_key.is_empty() {
+            return Ok(());
+        }
+
+        let values_left = std::mem::take(&mut self.left_range_values);
+        let values_left = values_left.iter().map(|x| x.as_ref()).collect::<Vec<_>>();
+
+        let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
+
+        let values_right = &values[table_schema.partition_key.len()..];
+
+        let first_unequal_position = values_left
+            .iter()
+            .zip(values_right.iter())
+            .position(|pair| pair.0 != pair.1)
+            .unwrap_or(table_schema.clustering_key.len());
+
+        let keys_equality_cond = table_schema
+            .partition_key
+            .iter()
+            .map(|name| format!("{} = ?", name))
+            .join(" AND ");
+
+        let mut conditions = vec![keys_equality_cond];
+
+        let mut query_values = values[..table_schema.partition_key.len()].to_vec();
+
+        let less_than = if right_included { "<=" } else { "<" };
+        let greater_than = if self.left_range_included { ">=" } else { ">" };
+
+        self.add_range_condition(
+            &mut conditions,
+            &mut query_values,
+            &values_left,
+            first_unequal_position,
+            greater_than,
+        );
+        self.add_range_condition(
+            &mut conditions,
+            &mut query_values,
+            values_right,
+            first_unequal_position,
+            less_than,
+        );
+
+        let query = Query::new(format!(
+            "DELETE FROM {}.{} WHERE {}",
+            self.precomputed_queries
+                .destination_table_params
+                .dest_keyspace_name,
+            self.precomputed_queries
+                .destination_table_params
+                .dest_table_name,
+            conditions.join(" AND ")
+        ));
+
+        run_statement(
+            &self
+                .precomputed_queries
+                .destination_table_params
+                .dest_session,
+            query,
+            &query_values,
+            timestamp,
+        )
+        .await
+    }
+
+    fn add_range_condition<'a>(
+        &self,
+        conditions: &mut Vec<String>,
+        query_values: &mut Vec<Option<&'a CqlValue>>,
+        values: &[Option<&'a CqlValue>],
+        first_unequal_position: usize,
+        relation: &str,
+    ) {
+        let (condition, new_query_values) =
+            self.generate_range_condition(values, first_unequal_position, relation);
+        if !new_query_values.is_empty() {
+            conditions.push(condition);
+            query_values.extend(new_query_values.iter());
+        }
+    }
+
+    fn generate_range_condition<'a>(
+        &self,
+        values: &[Option<&'a CqlValue>],
+        starting_position: usize,
+        relation: &str,
+    ) -> (String, Vec<Option<&'a CqlValue>>) {
+        let table_schema = &self.source_table_data.table_schema;
+        let first_null_index = values[starting_position..]
+            .iter()
+            .position(|x| x.is_none())
+            .map_or(table_schema.clustering_key.len(), |x| x + starting_position);
+
+        let condition = format!(
+            "({}) {} ({})",
+            table_schema.clustering_key[..first_null_index]
+                .iter()
+                .join(","),
+            relation,
+            std::iter::repeat("?").take(first_null_index).join(",")
+        );
+
+        let query_values = values[..first_null_index].to_vec();
+
+        (condition, query_values)
+    }
+
     // Returns tuple consisting of TTL, timestamp and vector of consecutive values from primary key.
-    fn get_common_cdc_row_data<'a>(&self, data: &'a CDCRow) -> (CqlValue, i64, Vec<&'a CqlValue>) {
+    fn get_common_cdc_row_data<'a>(
+        &self,
+        data: &'a CDCRow,
+    ) -> (CqlValue, i64, Vec<Option<&'a CqlValue>>) {
         let keys_iter = get_keys_iter(&self.source_table_data.table_schema);
         let ttl = CqlValue::Int(data.ttl.unwrap_or(0) as i32); // If data is inserted without TTL, setting it to 0 deletes existing TTL.
         let timestamp = ReplicatorConsumer::get_timestamp(data);
         let values = keys_iter
-            .clone()
-            .map(|col_name| data.get_value(col_name).as_ref().unwrap())
-            .collect::<Vec<&CqlValue>>();
+            .map(|col_name| data.get_value(col_name).as_ref())
+            .collect();
 
         (ttl, timestamp, values)
     }
@@ -718,13 +848,13 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [&'a CqlValue],
-        values_for_delete: &[&CqlValue],
+        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_delete: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
-        if let Some(value) = data.get_value(column_name) {
+        if let value @ Some(_) = data.get_value(column_name) {
             // Order of values: ttl, inserted value, pk condition values.
-            values_for_update[1] = value;
+            values_for_update[1] = value.as_ref();
             self.precomputed_queries
                 .overwrite_value(values_for_update, timestamp, column_name)
                 .await?;
@@ -744,7 +874,7 @@ impl ReplicatorConsumer {
             // Insert row with nulls, the rest will be done through an update.
             let mut insert_values = Vec::with_capacity(values.len() + 1);
             insert_values.extend(values.iter());
-            insert_values.push(&ttl);
+            insert_values.push(Some(&ttl));
 
             self.precomputed_queries
                 .insert_value(&insert_values, timestamp)
@@ -752,12 +882,12 @@ impl ReplicatorConsumer {
         }
 
         let mut values_for_update = Vec::with_capacity(2 + values.len());
-        values_for_update.extend([&ttl, &CqlValue::Int(0)]);
+        values_for_update.extend([Some(&ttl), Some(&CqlValue::Int(0))]);
         values_for_update.extend(values.iter());
 
         let mut values_for_list_update = Vec::with_capacity(3 + values.len());
         values_for_list_update.extend([Some(&ttl), None, None]);
-        values_for_list_update.extend(values.iter().map(|x| Some(*x)));
+        values_for_list_update.extend(values.iter());
 
         for column_name in &self.source_table_data.non_key_columns.clone() {
             match &self
@@ -842,6 +972,14 @@ fn get_keys_iter(table_schema: &Table) -> impl std::iter::Iterator<Item = &Strin
         .chain(table_schema.clustering_key.iter())
 }
 
+fn take_clustering_keys_values(table_schema: &Table, data: &mut CDCRow) -> Vec<Option<CqlValue>> {
+    table_schema
+        .clustering_key
+        .iter()
+        .map(|ck| data.take_value(ck))
+        .collect()
+}
+
 #[async_trait]
 impl Consumer for ReplicatorConsumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
@@ -850,6 +988,10 @@ impl Consumer for ReplicatorConsumer {
             OperationType::RowInsert => self.insert(data).await?,
             OperationType::RowDelete => self.delete_row(data).await?,
             OperationType::PartitionDelete => self.delete_partition(data).await?,
+            OperationType::RowRangeDelExclLeft => self.delete_row_range_left(data, false),
+            OperationType::RowRangeDelInclLeft => self.delete_row_range_left(data, true),
+            OperationType::RowRangeDelExclRight => self.delete_row_range_right(data, false).await?,
+            OperationType::RowRangeDelInclRight => self.delete_row_range_right(data, true).await?,
             _ => todo!("This type of operation is not supported yet."),
         }
 

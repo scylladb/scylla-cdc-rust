@@ -141,7 +141,7 @@ mod tests {
         ks_src: &str,
         ks_dst: &str,
         name: &str,
-        last_read: &mut u64,
+        last_read: &mut (u64, i32),
     ) -> anyhow::Result<()> {
         let result = session
             .query(
@@ -173,8 +173,9 @@ mod tests {
         for log in result.rows.unwrap_or_default() {
             let cdc_row = CDCRow::from_row(log, &schema);
             let time = cdc_row.time.to_timestamp().unwrap().to_unix_nanos();
-            if time > *last_read {
-                *last_read = time;
+            let batch_seq_no = cdc_row.batch_seq_no;
+            if (time, batch_seq_no) > *last_read {
+                *last_read = (time, batch_seq_no);
                 consumer.consume_cdc(cdc_row).await?;
             }
         }
@@ -409,7 +410,7 @@ mod tests {
         setup_udts(&session, &ks_src, &ks_dst, &udt_schemas).await?;
         setup_tables(&session, &ks_src, &ks_dst, &table_schema).await?;
         session.use_keyspace(&ks_src, false).await?;
-        let mut last_read = 0;
+        let mut last_read = (0, 0);
 
         for operation in operations {
             session.query(operation, []).await?;
@@ -888,7 +889,7 @@ mod tests {
             .unwrap();
 
         session.use_keyspace(&ks_src, false).await.unwrap();
-        let mut last_read = 0;
+        let mut last_read = (0, 0);
 
         for operation in operations {
             session.query(operation, []).await.unwrap();
@@ -974,6 +975,33 @@ mod tests {
         ];
 
         test_replication_with_udt(&get_uri(), schema, udt_schemas, operations)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_range_delete() {
+        let schema = TestTableSchema {
+            name: "RANGE_DELETE".to_string(),
+            partition_key: vec![("pk1", "int"), ("pk2", "int")],
+            clustering_key: vec![("ck1", "int"), ("ck2", "int"), ("ck3", "int")],
+            other_columns: vec![("v", "int")],
+        };
+
+        let operations = std::iter::repeat(0..5).take(3).multi_cartesian_product().map(|x| {
+            format!("INSERT INTO RANGE_DELETE (pk1, pk2, ck1, ck2, ck3, v) VALUES (0, 0, {}, {}, {}, 0)", x[0], x[1], x[2])
+        }).collect::<Vec<_>>();
+
+        let mut operations: Vec<&str> = operations.iter().map(|x| x.as_str()).collect();
+
+        operations.append(&mut vec![
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND ck1 = 0 AND ck2 > -1 AND ck2 < 1",
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND ck1 = 1 AND ck2 < 2",
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2) < (3, 3) AND (ck1, ck2, ck3) > (2, 2, 2)",
+            "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2, ck3) > (3, 3, 3)",
+        ]);
+
+        test_replication(&get_uri(), schema, operations)
             .await
             .unwrap();
     }

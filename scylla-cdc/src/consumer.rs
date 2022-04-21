@@ -147,7 +147,7 @@ impl CDCRow<'_> {
             } else if i == schema.batch_seq_no {
                 batch_seq_no = column.unwrap().as_int().unwrap();
             } else if i == schema.end_of_batch {
-                end_of_batch = column.unwrap().as_boolean().unwrap()
+                end_of_batch = column.is_some() && column.unwrap().as_boolean().unwrap()
             } else if i == schema.operation {
                 operation = OperationType::try_from(column.unwrap().as_tinyint().unwrap()).unwrap();
             } else if i == schema.ttl {
