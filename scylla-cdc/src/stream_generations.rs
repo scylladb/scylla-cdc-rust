@@ -187,7 +187,7 @@ impl GenerationFetcher {
         let (generation_sender, generation_receiver) = mpsc::channel(1);
 
         let (future, future_handle) = async move {
-            let generation = loop {
+            let mut generation = loop {
                 match self.fetch_generation_by_timestamp(&start_timestamp).await {
                     Ok(Some(generation)) => break generation,
                     Ok(None) => {
@@ -211,14 +211,14 @@ impl GenerationFetcher {
             }
 
             loop {
-                let generation = loop {
+                generation = loop {
                     match self.fetch_next_generation(&generation).await {
                         Ok(Some(generation)) => break generation,
                         Ok(None) => sleep(sleep_interval).await,
                         _ => warn!("Failed to fetch next generation"),
                     }
                 };
-                if generation_sender.send(generation).await.is_err() {
+                if generation_sender.send(generation.clone()).await.is_err() {
                     break;
                 }
             }
