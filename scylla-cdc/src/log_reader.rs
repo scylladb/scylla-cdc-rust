@@ -179,6 +179,8 @@ impl CDCReaderWorker {
                         })
                         .collect();
 
+                    self.set_upper_timestamp(self.end_timestamp).await;
+
                     stream_reader_tasks = self
                         .readers
                         .iter()

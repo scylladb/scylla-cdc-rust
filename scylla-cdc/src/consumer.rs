@@ -15,7 +15,7 @@ pub trait ConsumerFactory: Sync + Send {
     async fn new_consumer(&self) -> Box<dyn Consumer>;
 }
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(i8)]
 pub enum OperationType {
     PreImage,

@@ -31,8 +31,6 @@ mod tests {
     use std::sync::Arc;
     use std::time;
 
-    use tokio::time::sleep;
-
     use super::*;
     use scylla_cdc::log_reader::CDCLogReader;
     use scylla_cdc::test_utilities::{populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
@@ -68,7 +66,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut cdc_log_printer, _handle) = CDCLogReader::new(
+        let (mut _cdc_log_printer, handle) = CDCLogReader::new(
             shared_session,
             ks,
             TEST_TABLE.to_string(),
@@ -80,8 +78,6 @@ mod tests {
             Arc::new(PrinterConsumerFactory),
         );
 
-        sleep(time::Duration::from_secs(2)).await;
-
-        cdc_log_printer.stop();
+        handle.await.unwrap();
     }
 }
