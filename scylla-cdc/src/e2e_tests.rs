@@ -11,6 +11,7 @@ mod tests {
     use scylla::prepared_statement::PreparedStatement;
     use scylla::{Session, SessionBuilder};
     use std::collections::{HashMap, VecDeque};
+    use std::convert::identity;
     use std::hash::Hash;
     use std::sync::Arc;
     use std::time;
@@ -290,49 +291,39 @@ mod tests {
         }
 
         async fn compare(&mut self, result: OperationsMap) -> bool {
-            let mut is_ok = true;
-
-            for (pk, actual_operations) in result.lock().await.iter_mut() {
-                let expected_operations = match self.performed_operations.get_mut(pk) {
+            let mut results = result.lock().await.iter_mut().map(|(pk, actual_operations)| {
+                let mut expected_operations = match self.performed_operations.remove(pk) {
                     Some(ops) => ops,
                     None => {
                         eprintln!("Unexpected primary key {:?}", pk);
-                        is_ok = false;
-                        continue;
+                        return false;
                     }
                 };
                 let mut i = 0;
 
-                while let Some(next_expected) = expected_operations.pop_front() {
-                    i += 1;
-                    let next_actual = match actual_operations.pop_front() {
-                        Some(op) => op,
-                        None => {
-                            eprintln!("Too little read operations for primary key {:?}. Missing operations count: {}", pk, expected_operations.len() + 1);
-                            is_ok = false;
-                            break;
-                        }
-                    };
-
-                    if next_expected != next_actual {
-                        eprintln!("Operation no. {} not matching for primary key {:?}.", i, pk);
-                        eprintln!("\tExpected: {:?}, actual: {:?}", next_expected, next_actual);
-                        is_ok = false;
-                        break;
+                loop {
+                    match (expected_operations.pop_front(), actual_operations.pop_front()) {
+                        (Some(next_expected), Some(next_actual)) => {
+                            i += 1;
+                            if next_expected == next_actual {
+                                continue;
+                            }
+                            eprintln!("Operation no. {} not matching for primary key {:?}.", i, pk);
+                            eprintln!("\tExpected: {:?}, actual: {:?}", next_expected, next_actual);
+                        },
+                        (None, None) => return true,
+                        (None, _) => eprintln!("Too many read operations for primary key {:?}. Operations left: {}", pk, actual_operations.len() + 1),
+                        (_, None) => eprintln!("Too little read operations for primary key {:?}. Missing operations count: {}", pk, expected_operations.len() + 1),
                     }
+                    return false;
                 }
+            }).collect::<Vec<_>>();
 
-                if is_ok && expected_operations.len() != actual_operations.len() {
-                    eprintln!(
-                        "Too many read operations for primary key {:?}. Operations left: {}",
-                        pk,
-                        actual_operations.len()
-                    );
-                    is_ok = false;
-                }
+            for pk in self.performed_operations.keys() {
+                eprintln!("Expected primary key {:?} not found", pk);
+                results.push(false);
             }
-
-            is_ok
+            results.into_iter().all(identity)
         }
 
         async fn test_cdc(mut self, start: chrono::Duration) -> Result<()> {
