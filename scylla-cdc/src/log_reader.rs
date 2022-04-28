@@ -138,12 +138,12 @@ impl CDCReaderWorker {
                         _ => {}
                     }
                 }
-                Some(generation) = generation_receiver.recv(), if next_generation.is_none() => {
+                Some(generation) = generation_receiver.recv(), if next_generation.is_none() && err.is_none() => {
                     next_generation = Some(generation.clone());
                     had_first_generation = true;
                     self.set_upper_timestamp(generation.timestamp).await;
                 }
-                Ok(_) = self.end_timestamp_receiver.changed() => {
+                Ok(_) = self.end_timestamp_receiver.changed(), if err.is_none() => {
                     let timestamp = *self.end_timestamp_receiver.borrow_and_update();
                     self.end_timestamp = timestamp;
                     self.set_upper_timestamp(timestamp).await;
