@@ -15,8 +15,8 @@ use scylla::Session;
 use scylla_cdc::consumer::*;
 
 struct DestinationTableParams {
-    dest_session: Arc<Session>,
-    dest_keyspace_table_name: String,
+    session: Arc<Session>,
+    keyspace_table_name: String,
 
     // Strings for queries created dynamically:
     keys_cond: String,
@@ -35,7 +35,7 @@ struct PrecomputedQueries {
 
 impl PrecomputedQueries {
     async fn new(
-        dest_session: Arc<Session>,
+        session: Arc<Session>,
         dest_keyspace_name: String,
         dest_table_name: String,
         table_schema: &Table,
@@ -43,15 +43,15 @@ impl PrecomputedQueries {
         // Iterator for both: partition keys and clustering keys.
         let keys_iter = get_keys_iter(table_schema);
 
-        let dest_keyspace_table_name = format!("{}.{}", dest_keyspace_name, dest_table_name);
+        let keyspace_table_name = format!("{}.{}", dest_keyspace_name, dest_table_name);
         // Clone, because the iterator is consumed.
         let names = keys_iter.clone().join(",");
         let markers = keys_iter.clone().map(|_| "?").join(",");
 
-        let insert_query = dest_session
+        let insert_query = session
             .prepare(format!(
                 "INSERT INTO {} ({}) VALUES ({}) USING TTL ?",
-                dest_keyspace_table_name, names, markers
+                keyspace_table_name, names, markers
             ))
             .await
             .expect("Preparing insert query failed.");
@@ -63,25 +63,25 @@ impl PrecomputedQueries {
             .map(|name| format!("{} = ?", name))
             .join(" AND ");
 
-        let partition_delete_query = dest_session
+        let partition_delete_query = session
             .prepare(format!(
                 "DELETE FROM {} WHERE {}",
-                dest_keyspace_table_name, partition_keys_cond
+                keyspace_table_name, partition_keys_cond
             ))
             .await
             .expect("Preparing partition delete query failed.");
 
-        let delete_query = dest_session
+        let delete_query = session
             .prepare(format!(
                 "DELETE FROM {} WHERE {}",
-                dest_keyspace_table_name, keys_cond
+                keyspace_table_name, keys_cond
             ))
             .await
             .expect("Preparing delete query failed.");
 
         let destination_table_params = DestinationTableParams {
-            dest_session,
-            dest_keyspace_table_name,
+            session,
+            keyspace_table_name,
             keys_cond,
         };
 
@@ -108,7 +108,7 @@ impl PrecomputedQueries {
         timestamp: i64,
     ) -> anyhow::Result<()> {
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             self.partition_delete_query.clone(),
             values,
             timestamp,
@@ -118,7 +118,7 @@ impl PrecomputedQueries {
 
     async fn insert_value(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             self.insert_query.clone(),
             values,
             timestamp,
@@ -128,7 +128,7 @@ impl PrecomputedQueries {
 
     async fn delete_row(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             self.delete_query.clone(),
             values,
             timestamp,
@@ -149,10 +149,10 @@ impl PrecomputedQueries {
                 .entry(column_name.to_string())
                 .or_insert(
                     self.destination_table_params
-                        .dest_session
+                        .session
                         .prepare(format!(
                             "UPDATE {} USING TTL ? SET {} = ? WHERE {}",
-                            self.destination_table_params.dest_keyspace_table_name,
+                            self.destination_table_params.keyspace_table_name,
                             column_name,
                             self.destination_table_params.keys_cond
                         ))
@@ -161,7 +161,7 @@ impl PrecomputedQueries {
         };
 
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             overwrite_query.clone(),
             values,
             timestamp,
@@ -185,10 +185,10 @@ impl PrecomputedQueries {
                 .entry(column_name.to_string())
                 .or_insert(
                     self.destination_table_params
-                        .dest_session
+                        .session
                         .prepare(format!(
                             "UPDATE {} SET {} = NULL WHERE {}",
-                            self.destination_table_params.dest_keyspace_table_name,
+                            self.destination_table_params.keyspace_table_name,
                             column_name,
                             self.destination_table_params.keys_cond
                         ))
@@ -197,7 +197,7 @@ impl PrecomputedQueries {
         };
 
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             delete_query.clone(),
             values,
             timestamp,
@@ -217,10 +217,10 @@ impl PrecomputedQueries {
                 self.update_map_or_set_elements_queries
                     .entry(column_name.to_string())
                     .or_insert(
-                        self.destination_table_params.dest_session.prepare(
+                        self.destination_table_params.session.prepare(
                             format!(
                                 "UPDATE {tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                                tbl = self.destination_table_params.dest_keyspace_table_name,
+                                tbl = self.destination_table_params.keyspace_table_name,
                                 cond = self.destination_table_params.keys_cond,
                                 cname = column_name,
                             )
@@ -230,7 +230,7 @@ impl PrecomputedQueries {
         };
 
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             update_query.clone(),
             values,
             timestamp,
@@ -257,10 +257,10 @@ impl PrecomputedQueries {
                 .entry(column_name.to_string())
                 .or_insert(
                     self.destination_table_params
-                        .dest_session
+                        .session
                         .prepare(format!(
                             "UPDATE {tbl} SET {col} = null WHERE {cond}",
-                            tbl = self.destination_table_params.dest_keyspace_table_name,
+                            tbl = self.destination_table_params.keyspace_table_name,
                             col = column_name,
                             cond = self.destination_table_params.keys_cond,
                         ))
@@ -269,7 +269,7 @@ impl PrecomputedQueries {
         };
 
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             delete_query.clone(),
             values,
             timestamp,
@@ -292,11 +292,11 @@ impl PrecomputedQueries {
                 .entry(column_name.to_string())
                 .or_insert(
                     self.destination_table_params
-                        .dest_session
+                        .session
                         .prepare(
                             format!(
                                 "UPDATE {tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
-                                tbl = self.destination_table_params.dest_keyspace_table_name,
+                                tbl = self.destination_table_params.keyspace_table_name,
                                 list = column_name,
                                 cond = self.destination_table_params.keys_cond
                             )
@@ -306,7 +306,7 @@ impl PrecomputedQueries {
         };
 
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             update_query.clone(),
             values,
             timestamp,
@@ -327,10 +327,10 @@ impl PrecomputedQueries {
                 .entry(column_name.to_string())
                 .or_insert(
                     self.destination_table_params
-                        .dest_session
+                        .session
                         .prepare(format!(
                             "UPDATE {tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
-                            tbl = self.destination_table_params.dest_keyspace_table_name,
+                            tbl = self.destination_table_params.keyspace_table_name,
                             cname = column_name,
                             cond = self.destination_table_params.keys_cond,
                         ))
@@ -339,7 +339,7 @@ impl PrecomputedQueries {
         };
 
         run_prepared_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             update_query.clone(),
             values,
             timestamp,
@@ -355,13 +355,13 @@ impl PrecomputedQueries {
     ) -> anyhow::Result<()> {
         let remove_query = format!(
             "UPDATE {tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
-            tbl = self.destination_table_params.dest_keyspace_table_name,
+            tbl = self.destination_table_params.keyspace_table_name,
             removed_fields = removed_fields,
             cond = self.destination_table_params.keys_cond,
         );
 
         run_statement(
-            &self.destination_table_params.dest_session,
+            &self.destination_table_params.session,
             Query::new(remove_query),
             values,
             timestamp,
@@ -371,25 +371,25 @@ impl PrecomputedQueries {
 }
 
 async fn run_prepared_statement(
-    dest_session: &Arc<Session>,
+    session: &Arc<Session>,
     mut query: PreparedStatement,
     values: &[impl Value],
     timestamp: i64,
 ) -> anyhow::Result<()> {
     query.set_timestamp(Some(timestamp));
-    dest_session.execute(&query, values).await?;
+    session.execute(&query, values).await?;
 
     Ok(())
 }
 
 async fn run_statement(
-    dest_session: &Arc<Session>,
+    session: &Arc<Session>,
     mut query: Query,
     values: &[impl Value],
     timestamp: i64,
 ) -> anyhow::Result<()> {
     query.set_timestamp(Some(timestamp));
-    dest_session.query(query, values).await?;
+    session.query(query, values).await?;
 
     Ok(())
 }
@@ -410,7 +410,7 @@ pub(crate) struct ReplicatorConsumer {
 
 impl ReplicatorConsumer {
     pub(crate) async fn new(
-        dest_session: Arc<Session>,
+        session: Arc<Session>,
         dest_keyspace_name: String,
         dest_table_name: String,
         table_schema: Table,
@@ -425,14 +425,10 @@ impl ReplicatorConsumer {
             .map(|column| column.0.clone())
             .collect::<Vec<String>>();
 
-        let precomputed_queries = PrecomputedQueries::new(
-            dest_session,
-            dest_keyspace_name,
-            dest_table_name,
-            &table_schema,
-        )
-        .await
-        .expect("Preparing precomputed queries failed.");
+        let precomputed_queries =
+            PrecomputedQueries::new(session, dest_keyspace_name, dest_table_name, &table_schema)
+                .await
+                .expect("Preparing precomputed queries failed.");
 
         let source_table_data = SourceTableData {
             table_schema,
@@ -715,15 +711,12 @@ impl ReplicatorConsumer {
             "DELETE FROM {} WHERE {}",
             self.precomputed_queries
                 .destination_table_params
-                .dest_keyspace_table_name,
+                .keyspace_table_name,
             conditions.join(" AND ")
         ));
 
         run_statement(
-            &self
-                .precomputed_queries
-                .destination_table_params
-                .dest_session,
+            &self.precomputed_queries.destination_table_params.session,
             query,
             &query_values,
             timestamp,
@@ -953,7 +946,7 @@ impl Consumer for ReplicatorConsumer {
 }
 
 pub struct ReplicatorConsumerFactory {
-    dest_session: Arc<Session>,
+    session: Arc<Session>,
     dest_keyspace_name: String,
     dest_table_name: String,
     table_schema: Table,
@@ -963,11 +956,11 @@ impl ReplicatorConsumerFactory {
     /// Creates a new instance of `ReplicatorConsumerFactory`.
     /// Fetching schema metadata must be enabled in the session.
     pub fn new(
-        dest_session: Arc<Session>,
+        session: Arc<Session>,
         dest_keyspace_name: String,
         dest_table_name: String,
     ) -> anyhow::Result<ReplicatorConsumerFactory> {
-        let table_schema = dest_session
+        let table_schema = session
             .get_cluster_data()
             .get_keyspace_info()
             .get(&dest_keyspace_name)
@@ -978,7 +971,7 @@ impl ReplicatorConsumerFactory {
             .clone();
 
         Ok(ReplicatorConsumerFactory {
-            dest_session,
+            session,
             dest_keyspace_name,
             dest_table_name,
             table_schema,
@@ -991,7 +984,7 @@ impl ConsumerFactory for ReplicatorConsumerFactory {
     async fn new_consumer(&self) -> Box<dyn Consumer> {
         Box::new(
             ReplicatorConsumer::new(
-                self.dest_session.clone(),
+                self.session.clone(),
                 self.dest_keyspace_name.clone(),
                 self.dest_table_name.clone(),
                 self.table_schema.clone(),
