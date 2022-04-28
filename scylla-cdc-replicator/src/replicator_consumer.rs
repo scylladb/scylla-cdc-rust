@@ -477,7 +477,7 @@ impl ReplicatorConsumer {
 
     fn get_timestamp(data: &CDCRow<'_>) -> i64 {
         const NANOS_IN_MILLIS: u64 = 1000;
-        (data.time.to_timestamp().unwrap().to_unix_nanos() / NANOS_IN_MILLIS) as i64
+        (data.time.get_timestamp().unwrap().to_unix_nanos() / NANOS_IN_MILLIS) as i64
     }
 
     async fn delete_partition(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {

@@ -77,7 +77,7 @@ mod tests {
 
         for log in result.rows.unwrap_or_default() {
             let cdc_row = CDCRow::from_row(log, &schema);
-            let time = cdc_row.time.to_timestamp().unwrap().to_unix_nanos();
+            let time = cdc_row.time.get_timestamp().unwrap().to_unix_nanos();
             let batch_seq_no = cdc_row.batch_seq_no;
             if (time, batch_seq_no) > *last_read {
                 *last_read = (time, batch_seq_no);
