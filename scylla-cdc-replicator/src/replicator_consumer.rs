@@ -16,8 +16,7 @@ use scylla_cdc::consumer::*;
 
 struct DestinationTableParams {
     dest_session: Arc<Session>,
-    dest_keyspace_name: String,
-    dest_table_name: String,
+    dest_keyspace_table_name: String,
 
     // Strings for queries created dynamically:
     keys_cond: String,
@@ -44,14 +43,15 @@ impl PrecomputedQueries {
         // Iterator for both: partition keys and clustering keys.
         let keys_iter = get_keys_iter(table_schema);
 
+        let dest_keyspace_table_name = format!("{}.{}", dest_keyspace_name, dest_table_name);
         // Clone, because the iterator is consumed.
         let names = keys_iter.clone().join(",");
         let markers = keys_iter.clone().map(|_| "?").join(",");
 
         let insert_query = dest_session
             .prepare(format!(
-                "INSERT INTO {}.{} ({}) VALUES ({}) USING TTL ?",
-                dest_keyspace_name, dest_table_name, names, markers
+                "INSERT INTO {} ({}) VALUES ({}) USING TTL ?",
+                dest_keyspace_table_name, names, markers
             ))
             .await
             .expect("Preparing insert query failed.");
@@ -65,24 +65,23 @@ impl PrecomputedQueries {
 
         let partition_delete_query = dest_session
             .prepare(format!(
-                "DELETE FROM {}.{} WHERE {}",
-                dest_keyspace_name, dest_table_name, partition_keys_cond
+                "DELETE FROM {} WHERE {}",
+                dest_keyspace_table_name, partition_keys_cond
             ))
             .await
             .expect("Preparing partition delete query failed.");
 
         let delete_query = dest_session
             .prepare(format!(
-                "DELETE FROM {}.{} WHERE {}",
-                dest_keyspace_name, dest_table_name, keys_cond
+                "DELETE FROM {} WHERE {}",
+                dest_keyspace_table_name, keys_cond
             ))
             .await
             .expect("Preparing delete query failed.");
 
         let destination_table_params = DestinationTableParams {
             dest_session,
-            dest_keyspace_name,
-            dest_table_name,
+            dest_keyspace_table_name,
             keys_cond,
         };
 
@@ -152,9 +151,8 @@ impl PrecomputedQueries {
                     self.destination_table_params
                         .dest_session
                         .prepare(format!(
-                            "UPDATE {}.{} USING TTL ? SET {} = ? WHERE {}",
-                            self.destination_table_params.dest_keyspace_name,
-                            self.destination_table_params.dest_table_name,
+                            "UPDATE {} USING TTL ? SET {} = ? WHERE {}",
+                            self.destination_table_params.dest_keyspace_table_name,
                             column_name,
                             self.destination_table_params.keys_cond
                         ))
@@ -189,9 +187,8 @@ impl PrecomputedQueries {
                     self.destination_table_params
                         .dest_session
                         .prepare(format!(
-                            "UPDATE {}.{} SET {} = NULL WHERE {}",
-                            self.destination_table_params.dest_keyspace_name,
-                            self.destination_table_params.dest_table_name,
+                            "UPDATE {} SET {} = NULL WHERE {}",
+                            self.destination_table_params.dest_keyspace_table_name,
                             column_name,
                             self.destination_table_params.keys_cond
                         ))
@@ -222,9 +219,8 @@ impl PrecomputedQueries {
                     .or_insert(
                         self.destination_table_params.dest_session.prepare(
                             format!(
-                                "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                                ks = self.destination_table_params.dest_keyspace_name,
-                                tbl = self.destination_table_params.dest_table_name,
+                                "UPDATE {tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
+                                tbl = self.destination_table_params.dest_keyspace_table_name,
                                 cond = self.destination_table_params.keys_cond,
                                 cname = column_name,
                             )
@@ -263,9 +259,8 @@ impl PrecomputedQueries {
                     self.destination_table_params
                         .dest_session
                         .prepare(format!(
-                            "UPDATE {ks}.{tbl} SET {col} = null WHERE {cond}",
-                            ks = self.destination_table_params.dest_keyspace_name,
-                            tbl = self.destination_table_params.dest_table_name,
+                            "UPDATE {tbl} SET {col} = null WHERE {cond}",
+                            tbl = self.destination_table_params.dest_keyspace_table_name,
                             col = column_name,
                             cond = self.destination_table_params.keys_cond,
                         ))
@@ -300,9 +295,8 @@ impl PrecomputedQueries {
                         .dest_session
                         .prepare(
                             format!(
-                                "UPDATE {ks}.{tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
-                                ks = self.destination_table_params.dest_keyspace_name,
-                                tbl = self.destination_table_params.dest_table_name,
+                                "UPDATE {tbl} USING TTL ? SET {list}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {cond}",
+                                tbl = self.destination_table_params.dest_keyspace_table_name,
                                 list = column_name,
                                 cond = self.destination_table_params.keys_cond
                             )
@@ -335,9 +329,8 @@ impl PrecomputedQueries {
                     self.destination_table_params
                         .dest_session
                         .prepare(format!(
-                            "UPDATE {ks}.{tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
-                            ks = self.destination_table_params.dest_keyspace_name,
-                            tbl = self.destination_table_params.dest_table_name,
+                            "UPDATE {tbl} USING TTL ? SET {cname} = ? WHERE {cond}",
+                            tbl = self.destination_table_params.dest_keyspace_table_name,
                             cname = column_name,
                             cond = self.destination_table_params.keys_cond,
                         ))
@@ -361,9 +354,8 @@ impl PrecomputedQueries {
         removed_fields: &str,
     ) -> anyhow::Result<()> {
         let remove_query = format!(
-            "UPDATE {ks}.{tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
-            ks = self.destination_table_params.dest_keyspace_name,
-            tbl = self.destination_table_params.dest_table_name,
+            "UPDATE {tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
+            tbl = self.destination_table_params.dest_keyspace_table_name,
             removed_fields = removed_fields,
             cond = self.destination_table_params.keys_cond,
         );
@@ -720,13 +712,10 @@ impl ReplicatorConsumer {
         );
 
         let query = Query::new(format!(
-            "DELETE FROM {}.{} WHERE {}",
+            "DELETE FROM {} WHERE {}",
             self.precomputed_queries
                 .destination_table_params
-                .dest_keyspace_name,
-            self.precomputed_queries
-                .destination_table_params
-                .dest_table_name,
+                .dest_keyspace_table_name,
             conditions.join(" AND ")
         ));
 
