@@ -125,15 +125,15 @@ impl CDCReaderWorker {
 
         loop {
             tokio::select! {
-                Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated()  => {
+                Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated() => {
                     match evt {
                         Err(error) => {
                             err = Some(anyhow::Error::new(error));
-                            self.set_upper_timestamp(chrono::Duration::min_value()).await;
+                            self.stop_now().await;
                         }
                         Ok(Err(error)) => {
                             err = Some(error);
-                            self.set_upper_timestamp(chrono::Duration::min_value()).await;
+                            self.stop_now().await;
                         },
                         _ => {}
                     }
@@ -155,9 +155,7 @@ impl CDCReaderWorker {
                     return Err(err);
                 }
 
-                if let Some(generation) = next_generation {
-                    next_generation = None;
-
+                if let Some(generation) = next_generation.take() {
                     if generation.timestamp > self.end_timestamp {
                         return Ok(());
                     }
@@ -209,5 +207,10 @@ impl CDCReaderWorker {
         for reader in self.readers.iter() {
             reader.set_upper_timestamp(new_upper_timestamp).await;
         }
+    }
+
+    async fn stop_now(&self) {
+        self.set_upper_timestamp(chrono::Duration::min_value())
+            .await;
     }
 }
