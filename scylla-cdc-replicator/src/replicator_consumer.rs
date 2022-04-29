@@ -114,9 +114,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn insert_value(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
@@ -126,9 +124,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn delete_row(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
@@ -138,9 +134,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn overwrite_value(
@@ -174,9 +168,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn delete_value(
@@ -213,9 +205,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn update_map_or_set_elements(
@@ -249,9 +239,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn delete_list_value(
@@ -291,9 +279,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn update_list_elements(
@@ -331,9 +317,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn update_udt_elements(
@@ -367,9 +351,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn delete_udt_elements(
@@ -392,9 +374,7 @@ impl PrecomputedQueries {
             values,
             timestamp,
         )
-        .await?;
-
-        Ok(())
+        .await
     }
 }
 
@@ -489,21 +469,15 @@ impl ReplicatorConsumer {
 
         self.precomputed_queries
             .delete_partition(&values, timestamp)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     async fn update(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-        self.update_or_insert(data, false).await?;
-
-        Ok(())
+        self.update_or_insert(data, false).await
     }
 
     async fn insert(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-        self.update_or_insert(data, true).await?;
-
-        Ok(())
+        self.update_or_insert(data, true).await
     }
 
     // Function replicates adding and deleting elements
@@ -529,9 +503,7 @@ impl ReplicatorConsumer {
 
         self.precomputed_queries
             .update_map_or_set_elements(&values_for_update, timestamp, column_name)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     // Recreates INSERT/DELETE/UPDATE statement on non-frozen map or set.
@@ -553,7 +525,7 @@ impl ReplicatorConsumer {
                 values_for_delete,
                 timestamp,
             )
-            .await?;
+            .await
         } else {
             // adding/removing elements
             self.update_map_or_set_elements(
@@ -563,10 +535,8 @@ impl ReplicatorConsumer {
                 timestamp,
                 sentinel,
             )
-            .await?;
+            .await
         }
-
-        Ok(())
     }
 
     // Recreates INSERT/DELETE/UPDATE statement on non-frozen list.
@@ -632,9 +602,7 @@ impl ReplicatorConsumer {
             .await?;
 
         self.delete_udt_elements(column_name, data, timestamp, value, values_for_update)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     async fn delete_udt_elements<'a>(
@@ -686,14 +654,12 @@ impl ReplicatorConsumer {
                 values_for_delete,
                 timestamp,
             )
-            .await?;
+            .await
         } else {
             // add/remove elements in udt
             self.update_udt_elements(column_name, data, values_for_update, timestamp)
-                .await?;
+                .await
         }
-
-        Ok(())
     }
 
     fn delete_row_range_left(&mut self, mut data: CDCRow<'_>, included: bool) {
@@ -838,9 +804,7 @@ impl ReplicatorConsumer {
         let (_, timestamp, values) = self.get_common_cdc_row_data(&data);
         self.precomputed_queries
             .delete_row(&values, timestamp)
-            .await?;
-
-        Ok(())
+            .await
     }
 
     // Recreates INSERT/UPDATE/DELETE statement for single column in a row.
