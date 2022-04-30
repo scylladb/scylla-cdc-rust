@@ -32,7 +32,7 @@ mod tests {
     use std::time;
 
     use super::*;
-    use scylla_cdc::log_reader::CDCLogReader;
+    use scylla_cdc::log_reader::CDCLogReaderBuilder;
     use scylla_cdc::test_utilities::{populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
 
     const SECOND_IN_MILLIS: u64 = 1_000;
@@ -66,17 +66,19 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut _cdc_log_printer, handle) = CDCLogReader::new(
-            shared_session,
-            ks,
-            TEST_TABLE.to_string(),
-            start,
-            end,
-            time::Duration::from_millis(WINDOW_SIZE),
-            time::Duration::from_millis(SAFETY_INTERVAL),
-            time::Duration::from_millis(SLEEP_INTERVAL),
-            Arc::new(PrinterConsumerFactory),
-        );
+        let (mut _cdc_log_printer, handle) = CDCLogReaderBuilder::new()
+            .session(shared_session)
+            .keyspace(ks.as_str())
+            .table_name(TEST_TABLE)
+            .start_timestamp(start)
+            .end_timestamp(end)
+            .window_size(time::Duration::from_millis(WINDOW_SIZE))
+            .safety_interval(time::Duration::from_millis(SAFETY_INTERVAL))
+            .sleep_interval(time::Duration::from_millis(SLEEP_INTERVAL))
+            .consumer_factory(Arc::new(PrinterConsumerFactory))
+            .build()
+            .await
+            .expect("Creating cdc log printer failed!");
 
         handle.await.unwrap();
     }
