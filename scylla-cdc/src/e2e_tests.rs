@@ -1,21 +1,24 @@
 #[cfg(test)]
 mod tests {
-    use crate::cdc_types::ToTimestamp;
-    use crate::consumer::*;
-    use crate::log_reader::CDCLogReader;
-    use anyhow::{anyhow, Result};
-    use async_trait::async_trait;
-    use itertools::Itertools;
-    use scylla::frame::response::result::CqlValue;
-    use scylla::frame::value::{Value, ValueTooBig};
-    use scylla::prepared_statement::PreparedStatement;
-    use scylla::{Session, SessionBuilder};
     use std::collections::{HashMap, VecDeque};
     use std::convert::identity;
     use std::hash::Hash;
     use std::sync::Arc;
     use std::time;
+
+    use anyhow::{bail, Result};
+    use async_trait::async_trait;
+    use itertools::{repeat_n, Itertools};
+    use scylla::frame::response::result::CqlValue;
+    use scylla::frame::value::{Value, ValueTooBig};
+    use scylla::prepared_statement::PreparedStatement;
+    use scylla::Session;
     use tokio::sync::Mutex;
+
+    use crate::cdc_types::ToTimestamp;
+    use crate::consumer::*;
+    use crate::log_reader::CDCLogReader;
+    use crate::test_utilities::prepare_db;
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
@@ -111,7 +114,7 @@ mod tests {
             let ck = match data.take_value("ck") {
                 Some(CqlValue::Int(x)) => Some(x),
                 None => None,
-                Some(cql) => return Err(anyhow!(format!("Unexpected ck type: {:?}", cql))),
+                Some(cql) => bail!("Unexpected ck type: {:?}", cql),
             };
             let val = data.take_value("v").map(|cql| cql.as_int().unwrap());
 
@@ -147,72 +150,27 @@ mod tests {
         }
     }
 
-    fn get_uri() -> String {
-        std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
-    }
+    // Get queries to create, insert to and update a table.
+    fn get_queries(table_name: &str, pk_type_names: Vec<&str>) -> (String, String, String) {
+        let pk_definitions = pk_type_names
+            .iter()
+            .enumerate()
+            .map(|(i, type_name)| format!("pk{} {}", i + 1, type_name))
+            .join(", ");
+        let primary_key_tuple = (1..pk_type_names.len() + 1)
+            .map(|i| format!("pk{}", i))
+            .join(", ");
+        let binds = repeat_n('?', pk_type_names.len()).join(", ");
+        let pk_conditions = (1..pk_type_names.len() + 1)
+            .map(|i| format!("pk{} = ?", i))
+            .join(" AND ");
 
-    async fn get_session() -> Result<Session> {
-        Ok(SessionBuilder::new().known_node(get_uri()).build().await?)
-    }
-
-    // Creates test table and keyspace. Query should not contain keyspace name, only the table name.
-    async fn create_table_and_keyspace(
-        session: &Session,
-        table_name: &str,
-        pk_type_names: Vec<&str>,
-    ) -> Result<(PreparedStatement, PreparedStatement)> {
-        session.query("CREATE KEYSPACE IF NOT EXISTS e2e_test WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }", ()).await.unwrap();
-        session.await_schema_agreement().await.unwrap();
-        session.use_keyspace("e2e_test", false).await.unwrap();
-
-        session
-            .query(format!("DROP TABLE IF EXISTS {}", table_name), ())
-            .await
-            .unwrap();
-        session.await_schema_agreement().await.unwrap();
-
-        let (create_query, insert_query, update_query) = {
-            let pk_definitions = pk_type_names
-                .iter()
-                .enumerate()
-                .map(|(i, type_name)| format!("pk{} {}", i + 1, type_name))
-                .join(", ");
-            let primary_key_tuple = pk_type_names
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("pk{}", i + 1))
-                .join(", ");
-            let binds = pk_type_names.iter().map(|_| "?").join(", ");
-            let pk_conditions = pk_type_names
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("pk{} = ?", i + 1))
-                .join(" AND ");
-
-            (
-                format!(
-                    "CREATE TABLE {} ({}, ck int, v int, primary key (({}), ck)) WITH cdc = {{'enabled' : true}}",
-                    table_name, pk_definitions, primary_key_tuple
-                ),
-                format!(
-                    "INSERT INTO {} (v, {}, ck) VALUES ({}, ?, ?)",
-                    table_name, primary_key_tuple, binds,
-                ),
-                format!(
-                    "UPDATE {} SET v = ? WHERE {} AND ck = ?",
-                    table_name, pk_conditions,
-                )
-            )
-        };
-
-        session.query(create_query, ()).await.unwrap();
-
-        session.await_schema_agreement().await.unwrap();
-
-        Ok((
-            session.prepare(insert_query).await.unwrap(),
-            session.prepare(update_query).await.unwrap(),
-        ))
+        (
+            format!("CREATE TABLE {} ({}, ck int, v int, primary key (({}), ck)) WITH cdc = {{'enabled' : true}}",
+                    table_name, pk_definitions, primary_key_tuple),
+            format!("INSERT INTO {} (v, {}, ck) VALUES ({}, ?, ?)", table_name, primary_key_tuple, binds),
+            format!("UPDATE {} SET v = ? WHERE {} AND ck = ?", table_name, pk_conditions)
+        )
     }
 
     fn now() -> chrono::Duration {
@@ -221,6 +179,7 @@ mod tests {
 
     struct Test {
         session: Arc<Session>,
+        keyspace: String,
         performed_operations: HashMap<Vec<PrimaryKeyValue>, VecDeque<Operation>>,
         table_name: String,
         insert_query: PreparedStatement,
@@ -228,12 +187,16 @@ mod tests {
     }
 
     impl Test {
-        async fn new(session: Session, table_name: &str, pk_type_names: Vec<&str>) -> Result<Test> {
-            let (insert_query, update_query) =
-                create_table_and_keyspace(&session, table_name, pk_type_names).await?;
+        async fn new(table_name: &str, pk_type_names: Vec<&str>) -> Result<Test> {
+            let (create_query, insert_query, update_query) = get_queries(table_name, pk_type_names);
+
+            let (session, keyspace) = prepare_db(&[create_query], 1).await?;
+            let insert_query = session.prepare(insert_query).await?;
+            let update_query = session.prepare(update_query).await?;
 
             Ok(Test {
-                session: Arc::new(session),
+                session,
+                keyspace,
                 performed_operations: HashMap::new(),
                 table_name: table_name.to_string(),
                 insert_query,
@@ -333,7 +296,7 @@ mod tests {
 
             let (_tester, handle) = CDCLogReader::new(
                 Arc::clone(&self.session),
-                "e2e_test".to_string(),
+                self.keyspace.clone(),
                 self.table_name.clone(),
                 start - chrono::Duration::seconds(2),
                 end + chrono::Duration::seconds(2),
@@ -358,10 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_test_small() {
-        let session = get_session().await.unwrap();
-        let mut test = Test::new(session, "int_small_test", vec!["int"])
-            .await
-            .unwrap();
+        let mut test = Test::new("int_small_test", vec!["int"]).await.unwrap();
         let start = now();
 
         for i in 0..10 {
@@ -385,8 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_test_int_pk() {
-        let session = get_session().await.unwrap();
-        let mut test = Test::new(session, "int_test", vec!["int"]).await.unwrap();
+        let mut test = Test::new("int_test", vec!["int"]).await.unwrap();
         let start = now();
 
         for i in 0..100 {
@@ -410,8 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_test_int_string_pk() {
-        let session = get_session().await.unwrap();
-        let mut test = Test::new(session, "int_string_test", vec!["int", "text"])
+        let mut test = Test::new("int_string_test", vec!["int", "text"])
             .await
             .unwrap();
         let strings = vec!["blep".to_string(), "nghu".to_string(), "pkeee".to_string()];
