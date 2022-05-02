@@ -19,6 +19,7 @@ const DEFAULT_SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS * 10;
 const DEFAULT_WINDOW_SIZE: i64 = SECOND_IN_MILLIS * 60;
 const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 3;
 
+/// To create a new CDCLogReader instance please see documentation for [`CDCLogReaderBuilder`]
 pub struct CDCLogReader {
     // Tells the worker to stop
     // Usage of the "watch" channel will make it possible to change the the timestamp later,
@@ -163,6 +164,47 @@ impl CDCReaderWorker {
     }
 }
 
+/// CDCLogReaderBuilder is used to create new [`CDCLogReader`] instances.
+/// # Example
+///
+/// ```
+/// # use scylla_cdc::log_reader::{CDCLogReader, CDCLogReaderBuilder};
+/// # use scylla_cdc::consumer::{ConsumerFactory, Consumer, CDCRow};
+/// # use futures::future::RemoteHandle;
+/// # use scylla::{Session, SessionBuilder};
+/// # use std::sync::Arc;
+/// # use async_trait::async_trait;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// struct DummyConsumer;
+///
+/// #[async_trait]
+/// impl Consumer for DummyConsumer {
+///     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
+///         // ... consume received data ...
+///         Ok(())
+///     }
+/// }
+///
+/// struct DummyConsumerFactory;
+///
+/// #[async_trait]
+/// impl ConsumerFactory for DummyConsumerFactory {
+///     async fn new_consumer(&self) -> Box<dyn Consumer> {
+///         Box::new(DummyConsumer)
+///     }
+/// }
+///
+/// let session = SessionBuilder::new().known_node("127.0.0.1:9042").build().await.unwrap();
+/// let (cdc_log_printer, handle): (CDCLogReader, RemoteHandle<anyhow::Result<()>>) = CDCLogReaderBuilder::new()
+///     .session(Arc::new(session))
+///     .keyspace("log_reader_ks")
+///     .table_name("log_reader_table")
+///     .consumer_factory(Arc::new(DummyConsumerFactory))
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct CDCLogReaderBuilder {
     session: Option<Arc<Session>>,
     keyspace: Option<String>,
@@ -176,6 +218,14 @@ pub struct CDCLogReaderBuilder {
 }
 
 impl CDCLogReaderBuilder {
+    /// Creates new CDCLogReaderBuilder with default configuration.
+    ///
+    /// # Default configuration
+    /// * start_timestamp: current timestamp
+    /// * window_size: 60 seconds
+    /// * safety_interval: 30 seconds
+    /// * sleep_interval: 10 seconds
+    /// * end_timestamp: the maximum possible duration - i64::MAX milliseconds
     pub fn new() -> CDCLogReaderBuilder {
         let end_timestamp = chrono::Duration::max_value();
         let session = None;
@@ -205,51 +255,83 @@ impl CDCLogReaderBuilder {
         }
     }
 
+    /// Set session to enable [`CDCLogReader`] perform queries.
+    /// This is a required field for [`CDCLogReaderBuilder::build()`]
+    /// In case it is not set [`CDCLogReaderBuilder::build()`] will return error message:
+    /// `failed to create the cdc reader: missing session`
     pub fn session(mut self, session: Arc<Session>) -> Self {
         self.session = Some(session);
         self
     }
 
+    /// Set keyspace of the CDC log table that [`CDCLogReader`] instance will read data from.
+    /// This is a required field for [`CDCLogReaderBuilder::build()`]
+    /// In case it is not set [`CDCLogReaderBuilder::build()`] will return error message:
+    /// `failed to create the cdc reader: missing keyspace`
     pub fn keyspace(mut self, keyspace: &str) -> Self {
         self.keyspace = Some(keyspace.to_string());
         self
     }
 
+    /// Set table name of the CDC log table that [`CDCLogReader`] instance will read data from.
+    /// This is a required field for [`CDCLogReaderBuilder::build()`]
+    /// In case it is not set [`CDCLogReaderBuilder::build()`] will return error message:
+    /// `failed to create the cdc reader: missing table name`
     pub fn table_name(mut self, table_name: &str) -> Self {
         self.table_name = Some(table_name.to_string());
         self
     }
 
+    /// Set start timestamp from which [`CDCLogReader`] instance will start reading
+    /// from the user specified CDC log table.
     pub fn start_timestamp(mut self, start_timestamp: chrono::Duration) -> Self {
         self.start_timestamp = start_timestamp;
         self
     }
 
+    /// Set end timestamp to stop [`CDCLogReader`] instance reading data
+    /// from the user specified CDC log table.
     pub fn end_timestamp(mut self, end_timestamp: chrono::Duration) -> Self {
         self.end_timestamp = end_timestamp;
         self
     }
 
+    /// Set window size for the [`CDCLogReader`] instance
+    /// to read data from the user specified CDC log table window by window.
+    /// Default window size is 60 seconds.
     pub fn window_size(mut self, window_size: time::Duration) -> Self {
         self.window_size = window_size;
         self
     }
 
+    /// Set safety interval for the [`CDCLogReader`] instance
+    /// to not read data from the CDC log table that has timestamp later than now.
+    /// Default safety interval is 30 seconds.
     pub fn safety_interval(mut self, safety_interval: time::Duration) -> Self {
         self.safety_interval = safety_interval;
         self
     }
 
+    /// Set sleep interval for the [`CDCLogReader`] instance
+    /// to sleep for the specified amount of time after reading and consuming data from all
+    /// streams from a certain time window.
+    /// Default sleep interval is 10 seconds.
     pub fn sleep_interval(mut self, sleep_interval: time::Duration) -> Self {
         self.sleep_interval = sleep_interval;
         self
     }
 
+    /// Set consumer factory which will be used in the [`CDCLogReader`] instance to create
+    /// consumers and feed them with data fetched from the CDC log.
     pub fn consumer_factory(mut self, consumer_factory: Arc<dyn ConsumerFactory>) -> Self {
         self.consumer_factory = Some(consumer_factory);
         self
     }
 
+    /// Build the CDCLogReader after setting all the options
+    /// It will fail with an error message if all the required fields are not set.
+    /// Currently required fields are the following:
+    /// `session`, `keyspace`, `table_name`, `consumer_factory`
     pub async fn build(self) -> anyhow::Result<(CDCLogReader, RemoteHandle<anyhow::Result<()>>)> {
         let table_name = self.table_name.ok_or_else(|| {
             anyhow::anyhow!("failed to create the cdc reader: missing table name")
@@ -291,6 +373,7 @@ impl CDCLogReaderBuilder {
     }
 }
 
+/// Create a [`CDCLogReaderBuilder`] with default configuration, same as [`CDCLogReaderBuilder::new()`]
 impl Default for CDCLogReaderBuilder {
     fn default() -> Self {
         Self::new()
