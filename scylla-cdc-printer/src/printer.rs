@@ -17,7 +17,7 @@ impl Consumer for PrinterConsumer {
     }
 }
 
-struct PrinterConsumerFactory;
+pub struct PrinterConsumerFactory;
 
 #[async_trait]
 impl ConsumerFactory for PrinterConsumerFactory {
