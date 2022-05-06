@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -50,9 +50,6 @@ impl PreparedStatementCache {
 struct DestinationTableParams {
     session: Arc<Session>,
     keyspace_table_name: String,
-
-    // Strings for queries created dynamically:
-    keys_cond: String,
 }
 
 struct PrecomputedQueries {
@@ -149,7 +146,6 @@ impl PrecomputedQueries {
         let destination_table_params = DestinationTableParams {
             session,
             keyspace_table_name,
-            keys_cond,
         };
 
         Ok(PrecomputedQueries {
@@ -284,40 +280,18 @@ impl PrecomputedQueries {
 
     async fn update_udt_elements(
         &mut self,
+        element_name: &str,
         values: &[impl Value],
         timestamp: i64,
-        column_name: &str,
     ) -> anyhow::Result<()> {
         self.overwrite_queries
             .run_query(
                 &self.destination_table_params.session,
                 values,
                 timestamp,
-                column_name,
+                element_name,
             )
             .await
-    }
-
-    async fn delete_udt_elements(
-        &mut self,
-        values: &[impl Value],
-        timestamp: i64,
-        removed_fields: &str,
-    ) -> anyhow::Result<()> {
-        let remove_query = format!(
-            "UPDATE {tbl} USING TTL ? SET {removed_fields} WHERE {cond}",
-            tbl = self.destination_table_params.keyspace_table_name,
-            removed_fields = removed_fields,
-            cond = self.destination_table_params.keys_cond,
-        );
-
-        run_statement(
-            &self.destination_table_params.session,
-            Query::new(remove_query),
-            values,
-            timestamp,
-        )
-        .await
     }
 }
 
@@ -525,52 +499,23 @@ impl ReplicatorConsumer {
         values_for_update: &mut [Option<&'a CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
-        let empty_udt = CqlValue::UserDefinedType {
-            keyspace: "".to_string(),
-            type_name: "".to_string(),
-            fields: vec![],
-        };
-        let value = data.get_value(column_name).as_ref().unwrap_or(&empty_udt);
-        // Order of values: ttl, added elements, pk condition values.
+        let value = data.get_value(column_name).as_ref().unwrap();
+        let udt_fields = value.as_udt().unwrap();
+        let deleted_ids: HashSet<_> = data
+            .get_deleted_elements(column_name)
+            .iter()
+            .map(|id| id.as_smallint().unwrap() as usize)
+            .collect();
 
-        let values_for_update = &mut values_for_update.to_vec();
-        values_for_update[1] = Some(value);
-
-        self.precomputed_queries
-            .update_udt_elements(values_for_update, timestamp, column_name)
-            .await?;
-
-        self.delete_udt_elements(column_name, data, timestamp, value, values_for_update)
-            .await
-    }
-
-    async fn delete_udt_elements<'a>(
-        &mut self,
-        column_name: &str,
-        data: &'a CDCRow<'_>,
-        timestamp: i64,
-        value: &CqlValue,
-        values_for_update: &mut [Option<&'a CqlValue>],
-    ) -> anyhow::Result<()> {
-        let deleted_set = Vec::from(data.get_deleted_elements(column_name));
-
-        if !deleted_set.is_empty() {
-            let udt_fields = value.as_udt().unwrap();
-            let removed_fields = deleted_set
-                .iter()
-                .map(|deleted_idx| {
-                    let idx = deleted_idx.as_smallint().unwrap();
-                    let (udt_fields_by_id, _) = udt_fields.get(idx as usize).unwrap();
-                    format!("{}.{} = null", column_name, udt_fields_by_id)
-                })
-                .join(",");
-
-            let values_for_update = &mut values_for_update.to_vec();
-            values_for_update.remove(1);
-
-            self.precomputed_queries
-                .delete_udt_elements(values_for_update, timestamp, removed_fields.as_str())
-                .await?;
+        for (i, (field, value)) in udt_fields.iter().enumerate() {
+            if value.is_some() || deleted_ids.contains(&i) {
+                let element_name = format!("{}.{}", column_name, field);
+                // Order of values: ttl, updated element, pk condition values.
+                values_for_update[1] = value.as_ref();
+                self.precomputed_queries
+                    .update_udt_elements(&element_name, values_for_update, timestamp)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -594,10 +539,12 @@ impl ReplicatorConsumer {
                 timestamp,
             )
             .await
-        } else {
+        } else if data.get_value(column_name).is_some() {
             // add/remove elements in udt
             self.update_udt_elements(column_name, data, values_for_update, timestamp)
                 .await
+        } else {
+            Ok(())
         }
     }
 

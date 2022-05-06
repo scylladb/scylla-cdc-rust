@@ -859,8 +859,11 @@ mod tests {
         let operations = vec![
             "INSERT INTO TEST_UDT_ELEMENTS_UPDATE (pk, ck, v) VALUES (0, 1, {int_val: 1})",
             "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = 2 WHERE pk = 0 AND ck = 1",
+            "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.bool_val = true WHERE pk = 0 AND ck = 1",
             "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = 5, v.bool_val = null WHERE pk = 0 AND ck = 1",
             "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null, v.bool_val = false WHERE pk = 0 AND ck = 1",
+            "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = 5 WHERE pk = 0 AND ck = 1",
+            "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null WHERE pk = 0 AND ck = 1",
         ];
 
         test_replication_with_udt(schema, udt_schemas, operations)
