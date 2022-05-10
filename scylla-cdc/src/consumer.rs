@@ -1,3 +1,4 @@
+//! A module representing the logic behind consuming the data.
 use crate::cdc_types::StreamID;
 use async_trait::async_trait;
 use num_enum::TryFromPrimitive;
@@ -7,16 +8,30 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Formatter;
 
+/// Trait used to represent a user-defined callback
+/// used for processing read CDC rows.
+/// During reading the CDC log, the stream ids are grouped by VNodes.
+/// One Consumer is created for each such group
+/// when reading of a new generation starts
+/// and is destroyed after every row from that generation has been read.
+///
+/// For more information about the reading algorithms,
+/// please refer to the documentation of [`crate::log_reader`] module.
 #[async_trait]
 pub trait Consumer: Send {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()>;
 }
 
+/// Trait used to represent a factory of [`Consumer`] instances.
+/// For rules about creating new consumers,
+/// please refer to the documentation of ['Consumer'].
 #[async_trait]
 pub trait ConsumerFactory: Sync + Send {
     async fn new_consumer(&self) -> Box<dyn Consumer>;
 }
 
+/// Represents different types of CDC operations.
+/// For more information, see [the CDC documentation](<https://docs.scylladb.com/using-scylla/cdc/cdc-log-table/#operation-column>).
 #[derive(Clone, Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(i8)]
 pub enum OperationType {
@@ -58,6 +73,8 @@ const TTL_NAME: &str = "cdc$ttl";
 const IS_DELETED_PREFIX: &str = "cdc$deleted_";
 const ARE_ELEMENTS_DELETED_PREFIX: &str = "cdc$deleted_elements_";
 
+/// A structure used to map names of columns in the CDC
+/// to their indices in an internal vector.
 pub struct CDCRowSchema {
     // The usize values are indices of given values in the Row.columns vector.
     pub(crate) stream_id: usize,
@@ -130,6 +147,12 @@ impl CDCRowSchema {
     }
 }
 
+/// Represents data from a single row in the CDC log.
+/// The metadata can be accessed directly like any other member variable,
+/// other columns can be accessed by using the struct methods, e.g. [`get_value`].
+/// To get more information about the metadata, see [the CDC documentation](<https://docs.scylladb.com/using-scylla/cdc/cdc-log-table/>).
+///
+/// [`get_value`]: #method.get_value
 pub struct CDCRow<'schema> {
     pub stream_id: StreamID,
     pub time: uuid::Uuid,
