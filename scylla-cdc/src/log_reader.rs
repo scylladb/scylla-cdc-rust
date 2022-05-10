@@ -28,8 +28,7 @@ pub struct CDCLogReader {
 }
 
 impl CDCLogReader {
-    // Creates a reader and runs it immediately
-    pub fn new(end_timestamp: tokio::sync::watch::Sender<chrono::Duration>) -> Self {
+    fn new(end_timestamp: tokio::sync::watch::Sender<chrono::Duration>) -> Self {
         CDCLogReader { end_timestamp }
     }
 
