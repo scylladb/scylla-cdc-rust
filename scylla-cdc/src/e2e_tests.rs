@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::log_reader::CDCLogReaderBuilder;
     use std::collections::{HashMap, VecDeque};
     use std::convert::identity;
     use std::hash::Hash;
@@ -17,7 +18,6 @@ mod tests {
 
     use crate::cdc_types::ToTimestamp;
     use crate::consumer::*;
-    use crate::log_reader::CDCLogReader;
     use crate::test_utilities::prepare_db;
 
     const SECOND_IN_MILLIS: u64 = 1_000;
@@ -294,17 +294,19 @@ mod tests {
             let factory = Arc::new(TestConsumerFactory::new(Arc::clone(&results)));
             let end = now();
 
-            let (_tester, handle) = CDCLogReader::new(
-                Arc::clone(&self.session),
-                self.keyspace.clone(),
-                self.table_name.clone(),
-                start - chrono::Duration::seconds(2),
-                end + chrono::Duration::seconds(2),
-                time::Duration::from_millis(WINDOW_SIZE),
-                time::Duration::from_millis(SAFETY_INTERVAL),
-                time::Duration::from_millis(SLEEP_INTERVAL),
-                factory,
-            );
+            let (_tester, handle) = CDCLogReaderBuilder::new()
+                .session(Arc::clone(&self.session))
+                .keyspace(self.keyspace.as_str())
+                .table_name(self.table_name.as_str())
+                .start_timestamp(start - chrono::Duration::seconds(2))
+                .end_timestamp(end + chrono::Duration::seconds(2))
+                .window_size(time::Duration::from_millis(WINDOW_SIZE))
+                .safety_interval(time::Duration::from_millis(SAFETY_INTERVAL))
+                .sleep_interval(time::Duration::from_millis(SLEEP_INTERVAL))
+                .consumer_factory(factory)
+                .build()
+                .await
+                .expect("Creating cdc log printer failed!");
 
             handle.await.unwrap();
 
