@@ -49,6 +49,15 @@ impl fmt::Display for OperationType {
     }
 }
 
+const STREAM_ID_NAME: &str = "cdc$stream_id";
+const TIME_NAME: &str = "cdc$time";
+const BATCH_SEQ_NO_NAME: &str = "cdc$batch_seq_no";
+const END_OF_BATCH_NAME: &str = "cdc$end_of_batch";
+const OPERATION_NAME: &str = "cdc$operation";
+const TTL_NAME: &str = "cdc$ttl";
+const IS_DELETED_PREFIX: &str = "cdc$deleted_";
+const ARE_ELEMENTS_DELETED_PREFIX: &str = "cdc$deleted_elements_";
+
 pub struct CDCRowSchema {
     // The usize values are indices of given values in the Row.columns vector.
     pub(crate) stream_id: usize,
@@ -70,15 +79,6 @@ pub struct CDCRowSchema {
     pub(crate) deleted_el_mapping: HashMap<String, usize>,
 }
 
-const STREAM_ID_NAME: &str = "cdc$stream_id";
-const TIME_NAME: &str = "cdc$time";
-const BATCH_SEQ_NO_NAME: &str = "cdc$batch_seq_no";
-const END_OF_BATCH_NAME: &str = "cdc$end_of_batch";
-const OPERATION_NAME: &str = "cdc$operation";
-const TTL_NAME: &str = "cdc$ttl";
-const IS_DELETED_PREFIX: &str = "cdc$deleted_";
-const ARE_ELEMENTS_DELETED_PREFIX: &str = "cdc$deleted_elements_";
-
 impl CDCRowSchema {
     pub fn new(specs: &[ColumnSpec]) -> CDCRowSchema {
         let mut stream_id = 0;
@@ -96,7 +96,6 @@ impl CDCRowSchema {
         // Hashmaps will have indices of data in a new vector without the hardcoded values.
         for (i, spec) in specs.iter().enumerate() {
             match spec.name.as_str() {
-                // spec.name is public since 0.3.0 driver version, it didn't work on 0.2.1.
                 STREAM_ID_NAME => stream_id = i,
                 TIME_NAME => time = i,
                 BATCH_SEQ_NO_NAME => batch_seq_no = i,
