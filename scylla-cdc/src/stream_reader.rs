@@ -1,3 +1,5 @@
+//! A module containing the logic responsible for reading data from one stream.
+
 use std::cmp::{max, min};
 use std::sync::Arc;
 use std::time;
@@ -25,6 +27,9 @@ pub struct CDCReaderConfig {
     pub pause_between_saves: time::Duration,
 }
 
+/// A component responsible for reading data from one stream.
+/// For the description of the reading algorithm,
+/// please see the documentation of the [`log_reader`](crate::log_reader) module.
 pub struct StreamReader {
     session: Arc<Session>,
     stream_id_vec: Vec<StreamID>,
