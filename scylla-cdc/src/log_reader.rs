@@ -68,7 +68,7 @@ impl CDCReaderWorker {
         let mut stream_reader_tasks = FuturesUnordered::new();
 
         let mut next_generation: Option<GenerationTimestamp> = None;
-        let mut had_first_generation: bool = false;
+        let mut check_once_again: bool = true;
         let mut err: Option<anyhow::Error> = None;
 
         loop {
@@ -88,8 +88,8 @@ impl CDCReaderWorker {
                 }
                 Some(generation) = generation_receiver.recv(), if next_generation.is_none() && err.is_none() => {
                     next_generation = Some(generation.clone());
-                    had_first_generation = true;
                     self.set_upper_timestamp(generation.timestamp).await;
+                    check_once_again = true;
                 }
                 Ok(_) = self.end_timestamp_receiver.changed(), if err.is_none() => {
                     let timestamp = *self.end_timestamp_receiver.borrow_and_update();
@@ -141,10 +141,9 @@ impl CDCReaderWorker {
                             })
                         })
                         .collect();
-                } else if had_first_generation {
-                    // FIXME: There may be another generation coming in the future with timestamp < end_timestamp
-                    // that could have been missed because of earlier fetching failures.
-                    // More on this here https://github.com/piodul/scylla-cdc-rust/pull/10#discussion_r826865162
+                } else if check_once_again {
+                    check_once_again = false;
+                } else {
                     return Ok(());
                 }
             }
