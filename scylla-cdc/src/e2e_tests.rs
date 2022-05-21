@@ -9,6 +9,7 @@ mod tests {
 
     use anyhow::{bail, Result};
     use async_trait::async_trait;
+    use futures::future::RemoteHandle;
     use itertools::{repeat_n, Itertools};
     use scylla::frame::response::result::CqlValue;
     use scylla::frame::value::{Value, ValueTooBig};
@@ -17,6 +18,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::cdc_types::ToTimestamp;
+    use crate::checkpoints::TableBackedCheckpointSaver;
     use crate::consumer::*;
     use crate::test_utilities::prepare_db;
 
@@ -408,5 +410,87 @@ mod tests {
         }
 
         test.test_cdc(start).await.unwrap();
+    }
+
+    async fn create_reader_with_saving(
+        test: &Test,
+        factory: &Arc<TestConsumerFactory>,
+        start: chrono::Duration,
+        end: chrono::Duration,
+    ) -> RemoteHandle<Result<()>> {
+        let default_cp_saver = Arc::new(
+            TableBackedCheckpointSaver::new(
+                test.session.clone(),
+                &test.keyspace,
+                &format!("{}_checkpoints", test.table_name),
+                300,
+            )
+            .await
+            .unwrap(),
+        );
+        let (_tester, handle) = CDCLogReaderBuilder::new()
+            .session(Arc::clone(&test.session))
+            .keyspace(test.keyspace.as_str())
+            .table_name(test.table_name.as_str())
+            .start_timestamp(start)
+            .end_timestamp(end)
+            .window_size(time::Duration::from_millis(WINDOW_SIZE))
+            .safety_interval(time::Duration::from_millis(SAFETY_INTERVAL))
+            .sleep_interval(time::Duration::from_millis(SLEEP_INTERVAL))
+            .consumer_factory(factory.clone())
+            .should_save_progress(true)
+            .should_load_progress(true)
+            .pause_between_saves(time::Duration::from_millis(SLEEP_INTERVAL))
+            .checkpoint_saver(default_cp_saver)
+            .build()
+            .await
+            .expect("Creating cdc log printer failed!");
+
+        handle
+    }
+
+    async fn insert_new_rows_for_saving_test(test: &mut Test, index: i32) {
+        const INTERVAL_SIZE: i32 = 30;
+        for i in INTERVAL_SIZE * index..INTERVAL_SIZE * (index + 1) {
+            for j in (INTERVAL_SIZE * index..INTERVAL_SIZE * (index + 1)).rev() {
+                test.insert(vec![PrimaryKeyValue::Int(i)], j, Some(i * j))
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_test_saving_progress_complex() {
+        const N: i32 = 5;
+        let table_name = "test_saving_progress";
+        let start = now();
+
+        let mut test = Test::new(table_name, vec!["int"]).await.unwrap();
+
+        let results = Arc::new(Mutex::new(HashMap::new()));
+        let factory = Arc::new(TestConsumerFactory::new(Arc::clone(&results)));
+
+        for i in 0..N {
+            insert_new_rows_for_saving_test(&mut test, i).await;
+            let end = now();
+
+            let handle = create_reader_with_saving(
+                &test,
+                &factory,
+                start,
+                end + chrono::Duration::seconds(1),
+            )
+            .await;
+
+            handle.await.unwrap();
+        }
+
+        if !test.compare(results).await {
+            panic!(
+                "{}",
+                format!("Test not passed for table {}.", test.table_name)
+            );
+        }
     }
 }

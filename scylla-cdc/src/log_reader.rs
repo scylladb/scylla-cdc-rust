@@ -10,6 +10,7 @@ use futures::FutureExt;
 use scylla::Session;
 
 use crate::cdc_types::GenerationTimestamp;
+use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
 use crate::stream_generations::GenerationFetcher;
 use crate::stream_reader::StreamReader;
@@ -18,6 +19,7 @@ const SECOND_IN_MILLIS: i64 = 1_000;
 const DEFAULT_SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS * 10;
 const DEFAULT_WINDOW_SIZE: i64 = SECOND_IN_MILLIS * 60;
 const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 30;
+const DEFAULT_PAUSE: u64 = 10;
 
 /// To create a new CDCLogReader instance please see documentation for [`CDCLogReaderBuilder`]
 pub struct CDCLogReader {
@@ -55,6 +57,10 @@ struct CDCReaderWorker {
     readers: Vec<Arc<StreamReader>>,
     end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
     consumer_factory: Arc<dyn ConsumerFactory>,
+    should_load_progress: bool,
+    should_save_progress: bool,
+    checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
+    pause_between_saves: time::Duration,
 }
 
 impl CDCReaderWorker {
@@ -108,6 +114,14 @@ impl CDCReaderWorker {
                         return Ok(());
                     }
 
+                    if self.should_save_progress {
+                        self.checkpoint_saver
+                            .as_ref()
+                            .unwrap()
+                            .save_new_generation(&generation)
+                            .await?;
+                    }
+
                     self.readers = fetcher
                         .fetch_stream_ids(&generation)
                         .await?
@@ -120,6 +134,10 @@ impl CDCReaderWorker {
                                 self.window_size,
                                 self.safety_interval,
                                 self.sleep_interval,
+                                self.should_load_progress,
+                                self.should_save_progress,
+                                self.checkpoint_saver.clone(),
+                                self.pause_between_saves,
                             ))
                         })
                         .collect();
@@ -227,6 +245,10 @@ pub struct CDCLogReaderBuilder {
     safety_interval: time::Duration,
     sleep_interval: time::Duration,
     consumer_factory: Option<Arc<dyn ConsumerFactory>>,
+    should_load_progress: bool,
+    should_save_progress: bool,
+    checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
+    pause_between_saves: time::Duration,
 }
 
 impl CDCLogReaderBuilder {
@@ -238,6 +260,9 @@ impl CDCLogReaderBuilder {
     /// * safety_interval: 30 seconds
     /// * sleep_interval: 10 seconds
     /// * end_timestamp: the maximum possible duration - i64::MAX milliseconds
+    /// * should_load_progress: false
+    /// * should_save_progress: false,
+    /// * pause_between_saves: 10 seconds
     pub fn new() -> CDCLogReaderBuilder {
         let end_timestamp = chrono::Duration::max_value();
         let session = None;
@@ -253,7 +278,10 @@ impl CDCLogReaderBuilder {
         let safety_interval = time::Duration::from_millis(DEFAULT_SAFETY_INTERVAL as u64);
         let sleep_interval = time::Duration::from_millis(DEFAULT_SLEEP_INTERVAL as u64);
         let consumer_factory = None;
-
+        let should_load_progress = false;
+        let should_save_progress = false;
+        let checkpoint_saver = None;
+        let pause_between_saves = time::Duration::from_secs(DEFAULT_PAUSE);
         CDCLogReaderBuilder {
             session,
             keyspace,
@@ -264,6 +292,10 @@ impl CDCLogReaderBuilder {
             safety_interval,
             sleep_interval,
             consumer_factory,
+            should_load_progress,
+            should_save_progress,
+            checkpoint_saver,
+            pause_between_saves,
         }
     }
 
@@ -340,11 +372,42 @@ impl CDCLogReaderBuilder {
         self
     }
 
+    /// Set flag indicating whether the [`CDCLogReader`] instance should resume
+    /// progress from set previously checkpoints.
+    /// Default value is `false`.
+    pub fn should_load_progress(mut self, value: bool) -> Self {
+        self.should_load_progress = value;
+        self
+    }
+
+    /// Set flag indicating whether the [`CDCLogReader`] instance should
+    /// periodically save progress.
+    /// Default value is `false`.
+    pub fn should_save_progress(mut self, value: bool) -> Self {
+        self.should_save_progress = value;
+        self
+    }
+
+    /// Set duration of the pause between creating two consecutive checkpoints.
+    /// Default value is 10 seconds.
+    pub fn pause_between_saves(mut self, pause: time::Duration) -> Self {
+        self.pause_between_saves = pause;
+        self
+    }
+
+    /// Set instance of [`CDCCheckpointSaver`] trait object to load/save checkpoints.
+    pub fn checkpoint_saver(mut self, cp_saver: Arc<dyn CDCCheckpointSaver>) -> Self {
+        self.checkpoint_saver = Some(cp_saver);
+        self
+    }
+
     /// Build the CDCLogReader after setting all the options
     /// It will fail with an error message if all the required fields are not set.
     /// Currently required fields are the following:
     /// `session`, `keyspace`, `table_name`, `consumer_factory`
     pub async fn build(self) -> anyhow::Result<(CDCLogReader, RemoteHandle<anyhow::Result<()>>)> {
+        let should_use_checkpoint_saver = self.should_save_progress || self.should_load_progress;
+
         let table_name = self.table_name.ok_or_else(|| {
             anyhow::anyhow!("failed to create the cdc reader: missing table name")
         })?;
@@ -354,6 +417,13 @@ impl CDCLogReaderBuilder {
         let session = self
             .session
             .ok_or_else(|| anyhow::anyhow!("failed to create the cdc reader: missing session"))?;
+
+        if should_use_checkpoint_saver && self.checkpoint_saver.is_none() {
+            return Err(anyhow::anyhow!(
+                "to save or load progress you have to provide checkpoint_saver"
+            ));
+        }
+
         let consumer_factory = self.consumer_factory.ok_or_else(|| {
             anyhow::anyhow!("failed to create the cdc reader: missing consumer factory")
         })?;
@@ -363,11 +433,26 @@ impl CDCLogReaderBuilder {
             tokio::sync::watch::channel(end_timestamp);
         let readers = vec![];
 
+        let mut start_timestamp = self.start_timestamp;
+        if self.should_load_progress {
+            if let Some(generation) = self
+                .checkpoint_saver
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("checkpoint_saver is not set, while should_load is true")
+                })?
+                .load_last_generation()
+                .await?
+            {
+                start_timestamp = std::cmp::max(generation.timestamp, start_timestamp);
+            }
+        }
+
         let mut cdc_reader_worker = CDCReaderWorker {
             session,
             keyspace,
             table_name,
-            start_timestamp: self.start_timestamp,
+            start_timestamp,
             end_timestamp: self.end_timestamp,
             window_size: self.window_size,
             safety_interval: self.safety_interval,
@@ -375,6 +460,10 @@ impl CDCLogReaderBuilder {
             readers,
             end_timestamp_receiver,
             consumer_factory,
+            should_load_progress: self.should_load_progress,
+            should_save_progress: self.should_save_progress,
+            checkpoint_saver: self.checkpoint_saver,
+            pause_between_saves: self.pause_between_saves,
         };
 
         let (fut, handle) = async move { cdc_reader_worker.run().await }.remote_handle();
