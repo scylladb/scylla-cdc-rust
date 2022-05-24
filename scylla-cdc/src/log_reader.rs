@@ -17,7 +17,7 @@ use crate::stream_reader::StreamReader;
 const SECOND_IN_MILLIS: i64 = 1_000;
 const DEFAULT_SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS * 10;
 const DEFAULT_WINDOW_SIZE: i64 = SECOND_IN_MILLIS * 60;
-const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 3;
+const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 30;
 
 /// To create a new CDCLogReader instance please see documentation for [`CDCLogReaderBuilder`]
 pub struct CDCLogReader {
