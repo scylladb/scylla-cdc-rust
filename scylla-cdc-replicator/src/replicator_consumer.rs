@@ -11,6 +11,7 @@ use scylla::prepared_statement::PreparedStatement;
 use scylla::query::Query;
 use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
 use scylla::Session;
+use tracing::warn;
 
 use scylla_cdc::consumer::*;
 
@@ -836,7 +837,7 @@ impl Consumer for ReplicatorConsumer {
             OperationType::RowRangeDelInclLeft => self.delete_row_range_left(data, true),
             OperationType::RowRangeDelExclRight => self.delete_row_range_right(data, false).await?,
             OperationType::RowRangeDelInclRight => self.delete_row_range_right(data, true).await?,
-            _ => todo!("This type of operation is not supported yet."),
+            op => warn!("This type of operation - {:?} - is not supported yet.", op),
         }
 
         Ok(())
