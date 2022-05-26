@@ -13,7 +13,7 @@ use crate::cdc_types::GenerationTimestamp;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
 use crate::stream_generations::GenerationFetcher;
-use crate::stream_reader::StreamReader;
+use crate::stream_reader::{CDCReaderConfig, StreamReader};
 
 const SECOND_IN_MILLIS: i64 = 1_000;
 const DEFAULT_SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS * 10;
@@ -49,18 +49,11 @@ struct CDCReaderWorker {
     session: Arc<Session>,
     keyspace: String,
     table_name: String,
-    start_timestamp: chrono::Duration,
     end_timestamp: chrono::Duration,
-    sleep_interval: time::Duration,
-    window_size: time::Duration,
-    safety_interval: time::Duration,
     readers: Vec<Arc<StreamReader>>,
     end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
     consumer_factory: Arc<dyn ConsumerFactory>,
-    should_load_progress: bool,
-    should_save_progress: bool,
-    checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
-    pause_between_saves: time::Duration,
+    config: CDCReaderConfig,
 }
 
 impl CDCReaderWorker {
@@ -68,7 +61,7 @@ impl CDCReaderWorker {
         let fetcher = Arc::new(GenerationFetcher::new(&self.session));
         let (mut generation_receiver, _future_handle) = fetcher
             .clone()
-            .fetch_generations_continuously(self.start_timestamp, self.sleep_interval)
+            .fetch_generations_continuously(self.config.lower_timestamp, self.config.sleep_interval)
             .await?;
 
         let mut stream_reader_tasks = FuturesUnordered::new();
@@ -76,6 +69,8 @@ impl CDCReaderWorker {
         let mut next_generation: Option<GenerationTimestamp> = None;
         let mut current_generation: Option<GenerationTimestamp> = None;
         let mut err: Option<anyhow::Error> = None;
+
+        let mut reader_config = self.config.clone();
 
         loop {
             tokio::select! {
@@ -114,13 +109,17 @@ impl CDCReaderWorker {
                         return Ok(());
                     }
 
-                    if self.should_save_progress {
-                        self.checkpoint_saver
+                    if self.config.should_save_progress {
+                        self.config
+                            .checkpoint_saver
                             .as_ref()
                             .unwrap()
                             .save_new_generation(&generation)
                             .await?;
                     }
+
+                    reader_config.lower_timestamp =
+                        max(self.config.lower_timestamp, generation.timestamp);
 
                     self.readers = fetcher
                         .fetch_stream_ids(&generation)
@@ -130,14 +129,7 @@ impl CDCReaderWorker {
                             Arc::new(StreamReader::new(
                                 &self.session,
                                 stream_ids,
-                                max(self.start_timestamp, generation.timestamp),
-                                self.window_size,
-                                self.safety_interval,
-                                self.sleep_interval,
-                                self.should_load_progress,
-                                self.should_save_progress,
-                                self.checkpoint_saver.clone(),
-                                self.pause_between_saves,
+                                reader_config.clone(),
                             ))
                         })
                         .collect();
@@ -448,22 +440,26 @@ impl CDCLogReaderBuilder {
             }
         }
 
+        let config = CDCReaderConfig {
+            lower_timestamp: start_timestamp,
+            window_size: self.window_size,
+            safety_interval: self.safety_interval,
+            sleep_interval: self.sleep_interval,
+            should_load_progress: self.should_load_progress,
+            should_save_progress: self.should_save_progress,
+            checkpoint_saver: self.checkpoint_saver.clone(),
+            pause_between_saves: self.pause_between_saves,
+        };
+
         let mut cdc_reader_worker = CDCReaderWorker {
             session,
             keyspace,
             table_name,
-            start_timestamp,
             end_timestamp: self.end_timestamp,
-            window_size: self.window_size,
-            safety_interval: self.safety_interval,
-            sleep_interval: self.sleep_interval,
             readers,
             end_timestamp_receiver,
             consumer_factory,
-            should_load_progress: self.should_load_progress,
-            should_save_progress: self.should_save_progress,
-            checkpoint_saver: self.checkpoint_saver,
-            pause_between_saves: self.pause_between_saves,
+            config,
         };
 
         let (fut, handle) = async move { cdc_reader_worker.run().await }.remote_handle();
