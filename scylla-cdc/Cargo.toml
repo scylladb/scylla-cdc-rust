@@ -11,7 +11,7 @@ scylla = { git = "https://github.com/scylladb/scylla-rust-driver" }
 tokio = { version = "1.1.0", features = ["rt", "io-util", "net", "time", "macros", "sync"] }
 chrono = "0.4.19"
 futures = "0.3.17"
-uuid = "1.0.0"
+uuid = {version = "1.0.0", features = ["v1"]}
 num_enum = "0.5.4"
 async-trait = "0.1.51"
 tracing = "0.1.31"

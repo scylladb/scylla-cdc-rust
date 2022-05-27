@@ -272,6 +272,10 @@ impl CDCRow<'_> {
     pub fn collection_exists(&self, name: &str) -> bool {
         self.schema.deleted_el_mapping.contains_key(name)
     }
+
+    pub fn get_non_cdc_column_names(&self) -> impl Iterator<Item = &str> {
+        self.schema.mapping.keys().map(|column| column.as_str())
+    }
 }
 
 #[cfg(test)]
