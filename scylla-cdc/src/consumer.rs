@@ -4,6 +4,8 @@ use num_enum::TryFromPrimitive;
 use scylla::frame::response::result::CqlValue::Set;
 use scylla::frame::response::result::{ColumnSpec, CqlValue, Row};
 use std::collections::HashMap;
+use std::fmt;
+use std::fmt::Formatter;
 
 #[async_trait]
 pub trait Consumer: Send {
@@ -28,6 +30,23 @@ pub enum OperationType {
     RowRangeDelInclRight,
     RowRangeDelExclRight,
     PostImage,
+}
+
+impl fmt::Display for OperationType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match *self {
+            OperationType::PreImage => write!(f, "PreImage"),
+            OperationType::RowUpdate => write!(f, "RowUpdate"),
+            OperationType::RowInsert => write!(f, "RowInsert"),
+            OperationType::RowDelete => write!(f, "RowDelete"),
+            OperationType::PartitionDelete => write!(f, "PartitionDelete"),
+            OperationType::RowRangeDelInclLeft => write!(f, "RowRangeDelInclLeft"),
+            OperationType::RowRangeDelExclLeft => write!(f, "RowRangeDelExclLeft"),
+            OperationType::RowRangeDelInclRight => write!(f, "RowRangeDelInclRight"),
+            OperationType::RowRangeDelExclRight => write!(f, "RowRangeDelExclRight"),
+            OperationType::PostImage => write!(f, "PostImage"),
+        }
+    }
 }
 
 pub struct CDCRowSchema {

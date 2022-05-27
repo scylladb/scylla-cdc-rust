@@ -2,6 +2,7 @@ use scylla::cql_to_rust::{FromCqlVal, FromCqlValError};
 use scylla::frame::response::result::CqlValue;
 use scylla::frame::value::{Timestamp, Value, ValueTooBig};
 use scylla::FromRow;
+use std::fmt;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
 pub struct GenerationTimestamp {
@@ -17,6 +18,13 @@ impl Value for GenerationTimestamp {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, FromRow)]
 pub struct StreamID {
     pub(crate) id: Vec<u8>,
+}
+
+impl fmt::Display for StreamID {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let encoded_stream_id = hex::encode(self.id.clone());
+        write!(f, "{}", encoded_stream_id)
+    }
 }
 
 impl Value for StreamID {
