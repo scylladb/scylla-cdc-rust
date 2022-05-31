@@ -111,12 +111,11 @@ impl CDCReaderWorker {
                     self.readers = fetcher
                         .fetch_stream_ids(&generation)
                         .await?
-                        .iter()
-                        .flatten()
-                        .map(|stream_id| {
+                        .into_iter()
+                        .map(|stream_ids| {
                             Arc::new(StreamReader::new(
                                 &self.session,
-                                vec![stream_id.clone()],
+                                stream_ids,
                                 max(self.start_timestamp, generation.timestamp),
                                 self.window_size,
                                 self.safety_interval,
