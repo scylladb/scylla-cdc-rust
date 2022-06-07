@@ -68,7 +68,7 @@ impl CDCReaderWorker {
         let mut stream_reader_tasks = FuturesUnordered::new();
 
         let mut next_generation: Option<GenerationTimestamp> = None;
-        let mut had_first_generation: bool = false;
+        let mut current_generation: Option<GenerationTimestamp> = None;
         let mut err: Option<anyhow::Error> = None;
 
         loop {
@@ -88,7 +88,6 @@ impl CDCReaderWorker {
                 }
                 Some(generation) = generation_receiver.recv(), if next_generation.is_none() && err.is_none() => {
                     next_generation = Some(generation.clone());
-                    had_first_generation = true;
                     self.set_upper_timestamp(generation.timestamp).await;
                 }
                 Ok(_) = self.end_timestamp_receiver.changed(), if err.is_none() => {
@@ -104,6 +103,7 @@ impl CDCReaderWorker {
                 }
 
                 if let Some(generation) = next_generation.take() {
+                    current_generation = Some(generation.clone());
                     if generation.timestamp > self.end_timestamp {
                         return Ok(());
                     }
@@ -141,10 +141,24 @@ impl CDCReaderWorker {
                             })
                         })
                         .collect();
-                } else if had_first_generation {
-                    // FIXME: There may be another generation coming in the future with timestamp < end_timestamp
-                    // that could have been missed because of earlier fetching failures.
-                    // More on this here https://github.com/piodul/scylla-cdc-rust/pull/10#discussion_r826865162
+                } else if let Some(current) = current_generation.take() {
+                    if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
+                        if generation.timestamp <= self.end_timestamp {
+                            // Fetched next generation with lower or equal timestamp than end_timestamp
+                            next_generation = Some(generation.clone());
+                            self.set_upper_timestamp(generation.timestamp).await;
+                            continue;
+                        } else {
+                            // Fetched next generation with bigger timestamp than end_timestamp
+                            return Ok(());
+                        }
+                    } else {
+                        // Current generation's next generation is not available
+                        println!("WARN: Next generation is not available, some rows in the CDC log table may be unread.");
+                        return Ok(());
+                    }
+                } else {
+                    // First generation is not fetched
                     return Ok(());
                 }
             }
