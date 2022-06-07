@@ -1,18 +1,61 @@
 use anyhow;
 use async_trait::async_trait;
+use chrono::NaiveDateTime;
 
 use scylla_cdc::consumer::{CDCRow, Consumer, ConsumerFactory};
+
+const OUTPUT_WIDTH: i64 = 72;
 
 struct PrinterConsumer;
 
 #[async_trait]
 impl Consumer for PrinterConsumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-        // [TODO]: Add prettier printing
-        println!(
-            "time: {}, batch_seq_no: {}, end_of_batch: {}, operation: {:?}, ttl: {:?}",
-            data.time, data.batch_seq_no, data.end_of_batch, data.operation, data.ttl
+        let mut row_to_print = String::new();
+        // Print header with cdc-specific columns independent from the schema of base table
+        // (cdc$stream_id, cdc$time, etc.)
+        row_to_print.push_str(&print_row_change_header(&data));
+
+        // Print columns dependent on the base schema
+        // The appearing order of the columns is undefined
+        let column_names = data.get_non_cdc_column_names();
+        for column in column_names {
+            let value_field_name = column.to_owned();
+            let deleted_elems_field_name = column.to_owned() + "_deleted_elements";
+            let is_value_deleted_field_name = column.to_owned() + "_deleted";
+
+            if data.column_exists(column) {
+                if let Some(value) = data.get_value(column) {
+                    row_to_print.push_str(&print_field(
+                        value_field_name.as_str(),
+                        format!("{:?}", value).as_str(),
+                    ));
+                } else {
+                    row_to_print.push_str(&print_field(value_field_name.as_str(), "null"));
+                }
+            }
+
+            if data.collection_exists(column) {
+                row_to_print.push_str(&print_field(
+                    deleted_elems_field_name.as_str(),
+                    format!("{:?}", data.get_deleted_elements(column)).as_str(),
+                ));
+            }
+
+            if data.column_deletable(column) {
+                row_to_print.push_str(&print_field(
+                    is_value_deleted_field_name.as_str(),
+                    format!("{:?}", data.is_value_deleted(column)).as_str(),
+                ));
+            }
+        }
+
+        // Print end line
+        row_to_print.push_str(
+            "└────────────────────────────────────────────────────────────────────────────┘\n",
         );
+        println!("{}", row_to_print);
+
         Ok(())
     }
 }
@@ -24,6 +67,44 @@ impl ConsumerFactory for PrinterConsumerFactory {
     async fn new_consumer(&self) -> Box<dyn Consumer> {
         Box::new(PrinterConsumer)
     }
+}
+
+fn print_row_change_header(data: &CDCRow<'_>) -> String {
+    let mut header_to_print = String::new();
+    let stream_id = data.stream_id.to_string();
+    let (unix_timestamp, _) = data.time.get_timestamp().unwrap().to_unix();
+    let timestamp = NaiveDateTime::from_timestamp(unix_timestamp as i64, 0).to_string();
+    let operation = data.operation.to_string();
+    let batch_seq_no = data.batch_seq_no.to_string();
+    let end_of_batch = data.end_of_batch.to_string();
+    let time_to_live = data.ttl.map_or("null".to_string(), |ttl| ttl.to_string());
+
+    header_to_print.push_str(
+        "┌──────────────────────────── Scylla CDC log row ────────────────────────────┐\n",
+    );
+    header_to_print.push_str(&print_field("Stream id:", &stream_id));
+    header_to_print.push_str(&print_field("Timestamp:", &timestamp));
+    header_to_print.push_str(&print_field("Operation type:", &operation));
+    header_to_print.push_str(&print_field("Batch seq no:", &batch_seq_no));
+    header_to_print.push_str(&print_field("End of batch:", &end_of_batch));
+    header_to_print.push_str(&print_field("TTL:", &time_to_live));
+    header_to_print.push_str(
+        "├────────────────────────────────────────────────────────────────────────────┤\n",
+    );
+    header_to_print
+}
+
+fn print_field(field_name: &str, field_value: &str) -> String {
+    let mut field_to_print = format!("│ {}: {}", field_name, field_value);
+    let left_spaces: i64 =
+        OUTPUT_WIDTH - field_name.chars().count() as i64 - field_value.chars().count() as i64;
+
+    for _ in 0..left_spaces {
+        field_to_print.push(' ');
+    }
+
+    field_to_print.push_str(" │\n");
+    field_to_print
 }
 
 #[cfg(test)]
