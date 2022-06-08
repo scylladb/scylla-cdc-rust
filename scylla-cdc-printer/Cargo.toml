@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 scylla = { git = "https://github.com/scylladb/scylla-rust-driver" }
-scylla-cdc = { version = "0.1.0", path = "../scylla-cdc" }
+scylla-cdc = { version = "0.1.0", path = "../scylla-cdc", features = ["test"] }
 tokio = { version = "1.1.0", features = ["full"] }
 chrono = "0.4.19"
 futures = "0.3.17"

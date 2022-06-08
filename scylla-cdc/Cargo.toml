@@ -20,3 +20,8 @@ hex = "0.4.3"
 
 [dev-dependencies]
 hex = "0.4.3"
+
+[features]
+# "test" is a feature used only to share common utility functions for testing in the printer and the replicator.
+# Using this feature outside these two applications is neither necessary nor recommended.
+test = []

@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 # Temporary, until the necessary changes get released.
 scylla = { git = "https://github.com/scylladb/scylla-rust-driver" }
-scylla-cdc = { version = "0.1.0", path = "../scylla-cdc" }
+scylla-cdc = { version = "0.1.0", path = "../scylla-cdc", features = ["test"] }
 tokio = { version = "1.1.0", features = ["full"] }
 async-trait = "0.1.51"
 anyhow = "1.0.48"
