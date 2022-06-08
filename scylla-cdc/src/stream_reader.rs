@@ -2,7 +2,6 @@ use std::cmp::{max, min};
 use std::sync::Arc;
 use std::time;
 
-use chrono;
 use futures::StreamExt;
 use scylla::frame::value::Timestamp;
 use scylla::Session;
