@@ -6,6 +6,7 @@ use std::time;
 
 use futures::StreamExt;
 use scylla::frame::value::Timestamp;
+use scylla::prepared_statement::PreparedStatement;
 use scylla::Session;
 use tokio::sync::watch;
 use tokio::time::sleep;
@@ -118,25 +119,13 @@ impl StreamReader {
                 min(window_begin + window_size, now_timestamp - safety_interval),
             );
 
-            let mut rows_stream = self
-                .session
-                .execute_iter(
-                    query_base.clone(),
-                    (
-                        &self.stream_id_vec,
-                        Timestamp(window_begin),
-                        Timestamp(window_end),
-                    ),
-                )
-                .await?;
-
-            let schema = CDCRowSchema::new(rows_stream.get_column_specs());
-
-            while let Some(row) = rows_stream.next().await {
-                consumer
-                    .consume_cdc(CDCRow::from_row(row?, &schema))
-                    .await?;
-            }
+            self.fetch_and_consume_rows(
+                &query_base,
+                &mut consumer,
+                Timestamp(window_begin),
+                Timestamp(window_end),
+            )
+            .await?;
 
             if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref() {
                 if window_end >= *timestamp_to_stop {
@@ -156,6 +145,32 @@ impl StreamReader {
                 .as_ref()
                 .unwrap()
                 .save_checkpoint(&checkpoint)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn fetch_and_consume_rows(
+        &self,
+        query_base: &PreparedStatement,
+        consumer: &mut Box<dyn Consumer>,
+        window_begin: Timestamp,
+        window_end: Timestamp,
+    ) -> anyhow::Result<()> {
+        let mut rows_stream = self
+            .session
+            .execute_iter(
+                query_base.clone(),
+                (&self.stream_id_vec, &window_begin, &window_end),
+            )
+            .await?;
+
+        let schema = CDCRowSchema::new(rows_stream.get_column_specs());
+
+        while let Some(row) = rows_stream.next().await {
+            consumer
+                .consume_cdc(CDCRow::from_row(row?, &schema))
                 .await?;
         }
 
