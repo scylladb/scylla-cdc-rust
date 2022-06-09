@@ -4,7 +4,8 @@ use std::time;
 
 use chrono;
 use futures::StreamExt;
-use scylla::frame::value::Timestamp;
+use itertools::{repeat_n, Itertools};
+use scylla::frame::response::result::CqlValue;
 use scylla::Session;
 use tokio::time::sleep;
 
@@ -52,17 +53,30 @@ impl StreamReader {
         table_name: String,
         mut consumer: Box<dyn Consumer>,
     ) -> anyhow::Result<()> {
+        let bindings = repeat_n('?', self.stream_id_vec.len()).join(",");
         let query = format!(
             "SELECT * FROM {}.{}_scylla_cdc_log \
-            WHERE \"cdc$stream_id\" in ? \
+            WHERE \"cdc$stream_id\" in ({}) \
             AND \"cdc$time\" >= minTimeuuid(?) \
             AND \"cdc$time\" < minTimeuuid(?)",
-            keyspace, table_name
+            keyspace, table_name, bindings
         );
         let query_base = self.session.prepare(query).await?;
         let mut window_begin = self.lower_timestamp;
         let window_size = chrono::Duration::from_std(self.window_size)?;
         let safety_interval = chrono::Duration::from_std(self.safety_interval)?;
+
+        let mut values: Vec<CqlValue> = self
+            .stream_id_vec
+            .iter()
+            .map(|x| CqlValue::Blob(x.clone().id))
+            .collect();
+        let begin_index = values.len();
+        let end_index = values.len() + 1;
+        values.extend(vec![
+            CqlValue::Timestamp(window_begin),
+            CqlValue::Timestamp(window_begin),
+        ]); // Add dummy values at the end to resize the vector.
 
         loop {
             let window_end = max(
@@ -72,17 +86,12 @@ impl StreamReader {
                     chrono::Local::now().to_timestamp() - safety_interval,
                 ),
             );
+            values[begin_index] = CqlValue::Timestamp(window_begin);
+            values[end_index] = CqlValue::Timestamp(window_end);
 
             let mut rows_stream = self
                 .session
-                .execute_iter(
-                    query_base.clone(),
-                    (
-                        &self.stream_id_vec,
-                        Timestamp(window_begin),
-                        Timestamp(window_end),
-                    ),
-                )
+                .execute_iter(query_base.clone(), &values)
                 .await?;
 
             let schema = CDCRowSchema::new(rows_stream.get_column_specs());
