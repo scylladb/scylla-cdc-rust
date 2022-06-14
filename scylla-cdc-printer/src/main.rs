@@ -12,27 +12,27 @@ use crate::printer::PrinterConsumerFactory;
 #[derive(Parser)]
 struct Args {
     /// Keyspace name
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     keyspace: String,
 
     /// Table name
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     table: String,
 
     /// Address of a node in source cluster
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     hostname: String,
 
     /// Window size in seconds
-    #[clap(long, default_value_t = 60.)]
+    #[clap(long, default_value_t = 60., action = clap::ArgAction::Set)]
     window_size: f64,
 
     /// Safety interval in seconds
-    #[clap(long, default_value_t = 30.)]
+    #[clap(long, default_value_t = 30., action = clap::ArgAction::Set)]
     safety_interval: f64,
 
     /// Sleep interval in seconds
-    #[clap(long, default_value_t = 10.)]
+    #[clap(long, default_value_t = 10., action = clap::ArgAction::Set)]
     sleep_interval: f64,
 }
 
