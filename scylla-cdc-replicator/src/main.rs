@@ -13,35 +13,35 @@ use crate::replicator::Replicator;
 #[derive(Parser)]
 struct Args {
     /// Keyspace name
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     keyspace: String,
 
     /// Table names provided as a comma delimited string
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     table: String,
 
     /// Address of a node in source cluster
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     source: String,
 
     /// Address of a node in destination cluster
-    #[clap(short, long)]
+    #[clap(short, long, action = clap::ArgAction::Set)]
     destination: String,
 
     /// Window size in seconds
-    #[clap(long, default_value_t = 60.)]
+    #[clap(long, default_value_t = 60., action = clap::ArgAction::Set)]
     window_size: f64,
 
     /// Safety interval in seconds
-    #[clap(long, default_value_t = 30.)]
+    #[clap(long, default_value_t = 30., action = clap::ArgAction::Set)]
     safety_interval: f64,
 
     /// Sleep interval in seconds
-    #[clap(long, default_value_t = 10.)]
+    #[clap(long, default_value_t = 10., action = clap::ArgAction::Set)]
     sleep_interval: f64,
 
     /// Start datetime as RFC 3339 formatted string
-    #[clap(long)]
+    #[clap(long, action = clap::ArgAction::Set)]
     start_datetime: Option<String>,
 }
 
