@@ -7,38 +7,43 @@ use futures::StreamExt;
 use itertools::{repeat_n, Itertools};
 use scylla::frame::response::result::CqlValue;
 use scylla::Session;
+use tokio::sync::watch;
 use tokio::time::sleep;
 
-use crate::cdc_types::{StreamID, ToTimestamp};
+use crate::cdc_types::{GenerationTimestamp, StreamID, ToTimestamp};
+use crate::checkpoints::{start_saving_checkpoints, CDCCheckpointSaver, Checkpoint};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
+
+#[derive(Clone)]
+pub struct CDCReaderConfig {
+    pub lower_timestamp: chrono::Duration,
+    pub window_size: time::Duration,
+    pub safety_interval: time::Duration,
+    pub sleep_interval: time::Duration,
+    pub should_load_progress: bool,
+    pub should_save_progress: bool,
+    pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
+    pub pause_between_saves: time::Duration,
+}
 
 pub struct StreamReader {
     session: Arc<Session>,
     stream_id_vec: Vec<StreamID>,
-    lower_timestamp: chrono::Duration,
-    window_size: time::Duration,
-    safety_interval: time::Duration,
     upper_timestamp: tokio::sync::Mutex<Option<chrono::Duration>>,
-    sleep_interval: time::Duration,
+    config: CDCReaderConfig,
 }
 
 impl StreamReader {
     pub fn new(
         session: &Arc<Session>,
         stream_ids: Vec<StreamID>,
-        start_timestamp: chrono::Duration,
-        window_size: time::Duration,
-        safety_interval: time::Duration,
-        sleep_interval: time::Duration,
+        config: CDCReaderConfig,
     ) -> StreamReader {
         StreamReader {
             session: session.clone(),
             stream_id_vec: stream_ids,
-            lower_timestamp: start_timestamp,
-            window_size,
-            safety_interval,
             upper_timestamp: Default::default(),
-            sleep_interval,
+            config,
         }
     }
 
@@ -62,9 +67,36 @@ impl StreamReader {
             keyspace, table_name, bindings
         );
         let query_base = self.session.prepare(query).await?;
-        let mut window_begin = self.lower_timestamp;
-        let window_size = chrono::Duration::from_std(self.window_size)?;
-        let safety_interval = chrono::Duration::from_std(self.safety_interval)?;
+        let mut window_begin = self.config.lower_timestamp;
+        let window_size = chrono::Duration::from_std(self.config.window_size)?;
+        let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
+        let mut checkpoint = Checkpoint {
+            timestamp: window_begin.to_std()?,
+            stream_id: self.stream_id_vec[0].clone(),
+            generation: GenerationTimestamp {
+                timestamp: window_begin,
+            },
+        };
+        let (sender, receiver) = watch::channel(checkpoint.clone());
+
+        if self.config.should_load_progress {
+            let mut loaded_timestamp = chrono::Duration::max_value();
+            for stream in &self.stream_id_vec {
+                if let Some(timestamp) = self
+                    .config
+                    .checkpoint_saver
+                    .as_ref()
+                    .unwrap()
+                    .load_last_checkpoint(stream)
+                    .await?
+                {
+                    loaded_timestamp = min(timestamp, loaded_timestamp);
+                }
+            }
+            if loaded_timestamp != chrono::Duration::max_value() {
+                window_begin = max(window_begin, loaded_timestamp);
+            }
+        }
 
         let mut values: Vec<CqlValue> = self
             .stream_id_vec
@@ -77,6 +109,16 @@ impl StreamReader {
             CqlValue::Timestamp(window_begin),
             CqlValue::Timestamp(window_begin),
         ]); // Add dummy values at the end to resize the vector.
+
+        let mut _handle;
+        if self.config.should_save_progress {
+            _handle = start_saving_checkpoints(
+                self.stream_id_vec.clone(),
+                self.config.checkpoint_saver.as_ref().unwrap().clone(),
+                receiver,
+                self.config.pause_between_saves,
+            );
+        }
 
         loop {
             let window_end = max(
@@ -109,7 +151,18 @@ impl StreamReader {
             }
 
             window_begin = window_end;
-            sleep(self.sleep_interval).await;
+            checkpoint.timestamp = window_begin.to_std()?;
+            sender.send(checkpoint.clone())?;
+            sleep(self.config.sleep_interval).await;
+        }
+
+        if self.config.should_save_progress {
+            self.config
+                .checkpoint_saver
+                .as_ref()
+                .unwrap()
+                .save_checkpoint(&checkpoint)
+                .await?;
         }
 
         Ok(())
@@ -141,14 +194,22 @@ mod tests {
             safety_interval: time::Duration,
             sleep_interval: time::Duration,
         ) -> StreamReader {
-            StreamReader {
-                session: session.clone(),
-                stream_id_vec: stream_ids,
+            let config = CDCReaderConfig {
                 lower_timestamp: start_timestamp,
                 window_size,
                 safety_interval,
-                upper_timestamp: Default::default(),
                 sleep_interval,
+                should_load_progress: false,
+                should_save_progress: false,
+                checkpoint_saver: None,
+                pause_between_saves: Default::default(),
+            };
+
+            StreamReader {
+                session: session.clone(),
+                stream_id_vec: stream_ids,
+                upper_timestamp: Default::default(),
+                config,
             }
         }
     }
