@@ -226,9 +226,9 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 mod tests {
     use crate::cdc_types::{GenerationTimestamp, StreamID};
     use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, TableBackedCheckpointSaver};
-    use crate::test_utilities::{prepare_db, unique_name};
     use rand::prelude::*;
     use scylla::{IntoTypedRows, Session};
+    use scylla_cdc_test_utils::{prepare_db, unique_name};
     use std::ops::Add;
     use std::sync::Arc;
     use std::time::Duration;

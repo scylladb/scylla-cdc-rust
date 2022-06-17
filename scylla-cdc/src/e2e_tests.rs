@@ -15,12 +15,12 @@ mod tests {
     use scylla::frame::value::{Value, ValueTooBig};
     use scylla::prepared_statement::PreparedStatement;
     use scylla::Session;
+    use scylla_cdc_test_utils::prepare_db;
     use tokio::sync::Mutex;
 
     use crate::cdc_types::ToTimestamp;
     use crate::checkpoints::TableBackedCheckpointSaver;
     use crate::consumer::*;
-    use crate::test_utilities::prepare_db;
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;

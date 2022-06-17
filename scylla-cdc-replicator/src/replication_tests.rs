@@ -8,9 +8,8 @@ mod tests {
     use scylla::frame::response::result::{CqlValue, Row};
     use scylla::Session;
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
+    use scylla_cdc_test_utils::prepare_db;
     use std::sync::Arc;
-
-    use scylla_cdc::test_utilities::prepare_db;
 
     /// Tuple representing a column in the table that will be replicated.
     /// The first string is the name of the column.

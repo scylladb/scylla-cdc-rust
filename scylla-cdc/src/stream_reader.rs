@@ -174,10 +174,10 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
     use scylla::query::Query;
+    use scylla_cdc_test_utils::{populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
     use tokio::sync::Mutex;
 
     use super::*;
-    use crate::test_utilities::{populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;

@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.48"
 chrono = "0.4.19"
-scylla = "0.4.7"
+scylla = { git = "https://github.com/scylladb/scylla-rust-driver" }
