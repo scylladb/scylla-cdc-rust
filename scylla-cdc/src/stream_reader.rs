@@ -2,7 +2,6 @@ use std::cmp::{max, min};
 use std::sync::Arc;
 use std::time;
 
-use chrono;
 use futures::StreamExt;
 use itertools::{repeat_n, Itertools};
 use scylla::frame::response::result::CqlValue;
