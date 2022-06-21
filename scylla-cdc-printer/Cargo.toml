@@ -14,3 +14,6 @@ futures = "0.3.17"
 anyhow = "1.0.51"
 async-trait = "0.1.52"
 clap = { version = "3.1.10", features = ["derive"] }
+
+[dev-dependencies]
+scylla-cdc-test-utils = { path = "../scylla-cdc-test-utils" }

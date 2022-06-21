@@ -263,7 +263,7 @@ async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utilities::prepare_db;
+    use scylla_cdc_test_utils::prepare_db;
 
     use super::*;
 

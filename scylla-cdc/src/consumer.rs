@@ -281,8 +281,8 @@ impl CDCRow<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utilities::prepare_db;
     use scylla::Session;
+    use scylla_cdc_test_utils::prepare_db;
     use std::sync::Arc;
     // These tests should be indifferent to things like number of Scylla nodes,
     // so if run separately, they can be tested on one Scylla instance.

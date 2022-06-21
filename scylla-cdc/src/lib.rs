@@ -3,6 +3,5 @@ pub mod checkpoints;
 pub mod consumer;
 mod e2e_tests;
 pub mod log_reader;
-pub mod stream_generations;
-pub mod stream_reader;
-pub mod test_utilities;
+mod stream_generations;
+mod stream_reader;
