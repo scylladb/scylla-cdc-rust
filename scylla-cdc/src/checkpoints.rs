@@ -29,7 +29,7 @@ pub(crate) fn start_saving_checkpoints(
     checkpoint_saver: Arc<dyn CDCCheckpointSaver>,
     receiver: tokio::sync::watch::Receiver<Checkpoint>,
     saving_period: Duration,
-) -> RemoteHandle<anyhow::Result<()>> {
+) -> RemoteHandle<()> {
     let (fut, handle) = async move {
         loop {
             for stream in tracked_streams.iter() {
