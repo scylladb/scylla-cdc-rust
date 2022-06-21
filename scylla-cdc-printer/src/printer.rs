@@ -114,26 +114,16 @@ mod tests {
 
     use super::*;
     use scylla_cdc::log_reader::CDCLogReaderBuilder;
-    use scylla_cdc_test_utils::{populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
     const WINDOW_SIZE: u64 = SECOND_IN_MILLIS / 10 * 3;
     const SAFETY_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
 
-    trait ToTimestamp {
-        fn to_timestamp(&self) -> chrono::Duration;
-    }
-
-    impl<Tz: chrono::TimeZone> ToTimestamp for chrono::DateTime<Tz> {
-        fn to_timestamp(&self) -> chrono::Duration {
-            chrono::Duration::milliseconds(self.timestamp_millis())
-        }
-    }
-
     #[tokio::test]
     async fn test_cdc_log_printer() {
-        let start = chrono::Local::now().to_timestamp();
+        let start = now();
         let end = start + chrono::Duration::seconds(2);
 
         let (shared_session, ks) = prepare_simple_db().await.unwrap();

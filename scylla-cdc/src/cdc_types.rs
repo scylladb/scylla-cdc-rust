@@ -48,13 +48,3 @@ impl StreamID {
         StreamID { id: stream_id }
     }
 }
-
-pub(crate) trait ToTimestamp {
-    fn to_timestamp(&self) -> chrono::Duration;
-}
-
-impl<Tz: chrono::TimeZone> ToTimestamp for chrono::DateTime<Tz> {
-    fn to_timestamp(&self) -> chrono::Duration {
-        chrono::Duration::milliseconds(self.timestamp_millis())
-    }
-}

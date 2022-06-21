@@ -8,23 +8,13 @@ use scylla::{Session, SessionBuilder};
 pub const TEST_TABLE: &str = "t";
 static UNIQUE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-trait ToTimestamp {
-    fn to_timestamp(&self) -> chrono::Duration;
-}
-
-impl<Tz: chrono::TimeZone> ToTimestamp for chrono::DateTime<Tz> {
-    fn to_timestamp(&self) -> chrono::Duration {
-        chrono::Duration::milliseconds(self.timestamp_millis())
-    }
+pub fn now() -> chrono::Duration {
+    chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis())
 }
 
 pub fn unique_name() -> String {
     let cnt = UNIQUE_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let name = format!(
-        "test_rust_{}_{}",
-        chrono::Local::now().to_timestamp().num_seconds(),
-        cnt
-    );
+    let name = format!("test_rust_{}_{}", now().num_seconds(), cnt);
     println!("unique_name: {}", name);
     name
 }
