@@ -4,16 +4,21 @@ use std::cmp::{max, min};
 use std::sync::Arc;
 use std::time;
 
-use futures::StreamExt;
+use itertools::Itertools;
 use scylla::frame::value::Timestamp;
 use scylla::prepared_statement::PreparedStatement;
+use scylla::transport::errors::{DbError, QueryError};
 use scylla::Session;
 use tokio::sync::watch;
 use tokio::time::sleep;
+use tracing::{enabled, warn};
 
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{start_saving_checkpoints, CDCCheckpointSaver, Checkpoint};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
+
+const BASIC_TIMEOUT_SLEEP_MS: u128 = 10;
+const TIMEOUT_FACTOR: u128 = 2;
 
 #[derive(Clone)]
 pub struct CDCReaderConfig {
@@ -158,23 +163,86 @@ impl StreamReader {
         window_begin: Timestamp,
         window_end: Timestamp,
     ) -> anyhow::Result<()> {
-        let mut rows_stream = self
-            .session
-            .execute_iter(
-                query_base.clone(),
-                (&self.stream_id_vec, &window_begin, &window_end),
-            )
-            .await?;
+        let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
 
-        let schema = CDCRowSchema::new(rows_stream.get_column_specs());
+        let mut next_state = None;
+        let mut page_no = 0;
+        loop {
+            let state_clone = next_state.clone();
+            let query_res = self
+                .session
+                .execute_paged(
+                    query_base,
+                    (&self.stream_id_vec, &window_begin, &window_end),
+                    next_state,
+                )
+                .await;
+            match query_res {
+                Ok(x) => {
+                    sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
+                    page_no += 1;
+                    if let Some(rows) = x.rows {
+                        let schema = CDCRowSchema::new(&x.col_specs);
 
-        while let Some(row) = rows_stream.next().await {
-            consumer
-                .consume_cdc(CDCRow::from_row(row?, &schema))
-                .await?;
+                        for row in rows {
+                            consumer.consume_cdc(CDCRow::from_row(row, &schema)).await?;
+                        }
+                    }
+                    match x.paging_state {
+                        Some(state) => next_state = Some(state),
+                        None => break,
+                    }
+                }
+                Err(
+                    QueryError::TimeoutError | QueryError::DbError(DbError::ReadTimeout { .. }, _),
+                ) => {
+                    self.print_timeout_warning(
+                        &window_begin,
+                        &window_end,
+                        sleep_after_timeout,
+                        page_no,
+                    )
+                    .await;
+                    sleep(time::Duration::from_millis(sleep_after_timeout as u64)).await;
+                    sleep_after_timeout *= TIMEOUT_FACTOR;
+                    if sleep_after_timeout >= self.config.sleep_interval.as_millis() {
+                        sleep_after_timeout = self.config.sleep_interval.as_millis();
+                    }
+
+                    next_state = state_clone;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context("Session returned an error while fetching CDC rows."));
+                }
+            }
         }
-
         Ok(())
+    }
+
+    async fn print_timeout_warning(
+        &self,
+        window_begin: &Timestamp,
+        window_end: &Timestamp,
+        backoff: u128,
+        page_no: u64,
+    ) {
+        if enabled!(tracing::Level::WARN) {
+            let ids_str = self
+                .stream_id_vec
+                .iter()
+                .map(|x| format!("0x{}", hex::encode(&x.id)))
+                .join(", ");
+
+            warn!(
+                stream_ids = ids_str,
+                window_begin_ms = window_begin.0.num_milliseconds(),
+                window_end_ms = window_end.0.num_milliseconds(),
+                page_no = page_no,
+                current_backoff = backoff,
+                "Timeout while fetching CDC rows."
+            );
+        }
     }
 }
 
