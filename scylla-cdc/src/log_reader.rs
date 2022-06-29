@@ -1,3 +1,17 @@
+//! A module containing the logic behind reading and consuming the data.
+//!
+//! Only one stream generation is being read at a time,
+//! while data from each stream is being read concurrently by different StreamReaders.
+//!
+//! Every StreamReader reads all CDC rows added in a time window
+//! (not longer than `window_size`), then waiting for amount of time equal to `sleep_interval`
+//! before reading the next window.
+//! Before a newly added row is being read by the reader,
+//! a set amount of time, represented by `safety_interval`, must pass.
+//!
+//! For more information about the stream generations,
+//! please refer to the [Scylla CDC documentation](https://docs.scylladb.com/using-scylla/cdc/cdc-stream-generations/).
+
 use std::cmp::max;
 use std::sync::Arc;
 use std::time;

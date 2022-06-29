@@ -1,3 +1,4 @@
+//! A module representing the logic behind saving progress.
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 use anyhow;
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ pub struct Checkpoint {
 }
 
 /// Spawns a new task that periodically saves checkpoints.
-/// Takes vector of tracked by a [`StreamReader`] stream IDs.
+/// Takes vector of tracked by a [`StreamReader`](crate::stream_reader::StreamReader) stream IDs.
 /// Receives value of the last checkpoint via channel.
 /// We are using [`tokio::sync::watch`] channel, because we only need the latest value.
 /// Returns handle to check on this newly created task.
@@ -72,7 +73,7 @@ pub trait CDCCheckpointSaver: Send + Sync {
 
 /// Default implementation for [`CDCCheckpointSaver`] trait.
 /// Saves checkpoints in a special table using ScyllaDB.
-/// Along with checkpoints for each [`StreamReader`], the table contains
+/// Along with checkpoints for each StreamReader, the table contains
 /// a special row used for storing the latest generation.
 pub struct TableBackedCheckpointSaver {
     session: Arc<Session>,
