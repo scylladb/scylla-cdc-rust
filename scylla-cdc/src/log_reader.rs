@@ -22,6 +22,7 @@ use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
 use scylla::Session;
+use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
 use crate::checkpoints::CDCCheckpointSaver;
@@ -177,7 +178,7 @@ impl CDCReaderWorker {
                         }
                     } else {
                         // Current generation's next generation is not available
-                        println!("WARN: Next generation is not available, some rows in the CDC log table may be unread.");
+                        warn!("Next generation is not available, some rows in the CDC log table may be unread.");
                         return Ok(());
                     }
                 } else {
