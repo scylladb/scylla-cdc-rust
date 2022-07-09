@@ -4,11 +4,12 @@ use std::cmp::{max, min};
 use std::sync::Arc;
 use std::time;
 
+use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::frame::value::Timestamp;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::{DbError, QueryError};
-use scylla::Session;
+use scylla::{Bytes, QueryResult, Session};
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{enabled, warn};
@@ -32,11 +33,44 @@ pub struct CDCReaderConfig {
     pub pause_between_saves: time::Duration,
 }
 
+/// A wrapper for `Session` objects used to make mocking the Session possible.
+#[async_trait]
+trait StreamSession: Sync + Send {
+    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError>;
+    async fn execute_paged_statement(
+        &self,
+        statement: &PreparedStatement,
+        ids: &[StreamID],
+        window_begin: &Timestamp,
+        window_end: &Timestamp,
+        paging_state: Option<Bytes>,
+    ) -> Result<QueryResult, QueryError>;
+}
+
+#[async_trait]
+impl StreamSession for Session {
+    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError> {
+        self.prepare(query).await
+    }
+
+    async fn execute_paged_statement(
+        &self,
+        statement: &PreparedStatement,
+        ids: &[StreamID],
+        window_begin: &Timestamp,
+        window_end: &Timestamp,
+        paging_state: Option<Bytes>,
+    ) -> Result<QueryResult, QueryError> {
+        self.execute_paged(statement, (ids, window_begin, window_end), paging_state)
+            .await
+    }
+}
+
 /// A component responsible for reading data from one stream.
 /// For the description of the reading algorithm,
 /// please see the documentation of the [`log_reader`](crate::log_reader) module.
 pub struct StreamReader {
-    session: Arc<Session>,
+    session: Arc<dyn StreamSession>,
     stream_id_vec: Vec<StreamID>,
     upper_timestamp: tokio::sync::Mutex<Option<chrono::Duration>>,
     config: CDCReaderConfig,
@@ -74,7 +108,7 @@ impl StreamReader {
             AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE",
             keyspace, table_name
         );
-        let query_base = self.session.prepare(query).await?;
+        let query_base = self.session.prepare_statement(query).await?;
         let mut window_begin = self.config.lower_timestamp;
         let window_size = chrono::Duration::from_std(self.config.window_size)?;
         let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
@@ -171,9 +205,11 @@ impl StreamReader {
             let state_clone = next_state.clone();
             let query_res = self
                 .session
-                .execute_paged(
+                .execute_paged_statement(
                     query_base,
-                    (&self.stream_id_vec, &window_begin, &window_end),
+                    &self.stream_id_vec,
+                    &window_begin,
+                    &window_end,
                     next_state,
                 )
                 .await;
@@ -250,8 +286,12 @@ impl StreamReader {
 mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
+    use scylla::frame::types::LegacyConsistency;
     use scylla::query::Query;
+    use scylla::transport::errors::QueryError;
     use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+    use std::sync::atomic::AtomicIsize;
+    use std::sync::atomic::Ordering::Relaxed;
     use tokio::sync::Mutex;
 
     use super::*;
@@ -348,6 +388,41 @@ mod tests {
             );
             self.fetched_rows.lock().await.push(new_val);
             Ok(())
+        }
+    }
+
+    struct TimeoutSession {
+        session: Arc<Session>,
+        counter: Arc<AtomicIsize>,
+    }
+
+    #[async_trait]
+    impl StreamSession for TimeoutSession {
+        async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError> {
+            self.session.prepare(query).await
+        }
+
+        async fn execute_paged_statement(
+            &self,
+            statement: &PreparedStatement,
+            ids: &[StreamID],
+            window_begin: &Timestamp,
+            window_end: &Timestamp,
+            paging_state: Option<Bytes>,
+        ) -> Result<QueryResult, QueryError> {
+            if self.counter.fetch_sub(1, Relaxed) >= 0 {
+                let read_timeout = DbError::ReadTimeout {
+                    consistency: LegacyConsistency::Regular(Default::default()),
+                    received: 0,
+                    required: 0,
+                    data_present: false,
+                };
+                Err(QueryError::DbError(read_timeout, String::new()))
+            } else {
+                self.session
+                    .execute_paged(statement, (ids, window_begin, window_end), paging_state)
+                    .await
+            }
         }
     }
 
@@ -486,6 +561,46 @@ mod tests {
             assert_eq!(t, 0);
             assert_eq!(v.to_string(), "val0".to_string());
             assert_eq!(s.to_string(), "static0".to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_retry_test() {
+        let (shared_session, ks) = prepare_simple_db().await.unwrap();
+
+        let partition_key = 0;
+        populate_simple_db_with_pk(&shared_session, partition_key)
+            .await
+            .unwrap();
+
+        let mut cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
+        let mocked_session = TimeoutSession {
+            session: shared_session,
+            counter: Arc::new(AtomicIsize::new(8)),
+        };
+        cdc_reader.session = Arc::new(mocked_session);
+        // Modify default sleep interval so that the test terminates faster
+        // (maximal wait time in backoff is equal to sleep_interval).
+        cdc_reader.config.sleep_interval = time::Duration::from_millis(1500);
+        cdc_reader
+            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .await;
+        let fetched_rows = Arc::new(Mutex::new(vec![]));
+        let consumer = Box::new(FetchTestConsumer {
+            fetched_rows: Arc::clone(&fetched_rows),
+        });
+
+        cdc_reader
+            .fetch_cdc(ks, TEST_TABLE.to_string(), consumer)
+            .await
+            .unwrap();
+
+        for (count, row) in fetched_rows.lock().await.iter().enumerate() {
+            let (pk, s, t, v) = row.clone();
+            assert_eq!(pk, partition_key as i32);
+            assert_eq!(t, count as i32);
+            assert_eq!(v.to_string(), format!("val{}", count));
+            assert_eq!(s.to_string(), format!("static{}", count));
         }
     }
 }
