@@ -490,3 +490,59 @@ impl Default for CDCLogReaderBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::consumer::{CDCRow, Consumer, ConsumerFactory};
+    use crate::log_reader::CDCLogReaderBuilder;
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+
+    struct ErrorConsumer;
+    struct ErrorConsumerFactory;
+
+    const ERR_MESSAGE: &str = "oops";
+    const SAFETY_INTERVAL: u64 = 3000;
+
+    #[async_trait]
+    impl Consumer for ErrorConsumer {
+        async fn consume_cdc(&mut self, _: CDCRow<'_>) -> anyhow::Result<()> {
+            Err(anyhow!(ERR_MESSAGE))
+        }
+    }
+
+    #[async_trait]
+    impl ConsumerFactory for ErrorConsumerFactory {
+        async fn new_consumer(&self) -> Box<dyn Consumer> {
+            Box::new(ErrorConsumer)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_err_return() {
+        let (session, ks) = prepare_simple_db().await.unwrap();
+        let start = now();
+        populate_simple_db_with_pk(&session, 0).await.unwrap();
+
+        let (_, handle) = CDCLogReaderBuilder::new()
+            .session(session)
+            .keyspace(&ks)
+            .table_name(TEST_TABLE)
+            .start_timestamp(start)
+            .end_timestamp(now())
+            .safety_interval(Duration::from_millis(SAFETY_INTERVAL))
+            .consumer_factory(Arc::new(ErrorConsumerFactory))
+            .build()
+            .await
+            .unwrap();
+
+        match handle.await {
+            Ok(_) => panic!("The handle should have returned an error!"),
+            Err(e) => assert_eq!(e.to_string(), ERR_MESSAGE),
+        };
+    }
+}
