@@ -490,3 +490,106 @@ impl Default for CDCLogReaderBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::consumer::{CDCRow, Consumer, ConsumerFactory};
+    use crate::log_reader::CDCLogReaderBuilder;
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+
+    struct ErrorConsumer {
+        id: usize,
+        condition: fn(usize) -> bool,
+    }
+    struct ErrorConsumerFactory {
+        next_id: Arc<AtomicUsize>,
+        condition: fn(usize) -> bool,
+    }
+
+    const ERR_MESSAGE: &str = "oops";
+    const SAFETY_INTERVAL: u64 = 3000;
+
+    #[async_trait]
+    impl Consumer for ErrorConsumer {
+        async fn consume_cdc(&mut self, _: CDCRow<'_>) -> anyhow::Result<()> {
+            if (self.condition)(self.id) {
+                Err(anyhow!(ERR_MESSAGE))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConsumerFactory for ErrorConsumerFactory {
+        async fn new_consumer(&self) -> Box<dyn Consumer> {
+            Box::new(ErrorConsumer {
+                id: self.next_id.fetch_add(1, Relaxed),
+                condition: self.condition,
+            })
+        }
+    }
+
+    async fn test_err(condition: fn(usize) -> bool, pk_count: u32, check_message: bool) {
+        let factory = Arc::new(ErrorConsumerFactory {
+            next_id: Arc::new(AtomicUsize::new(0)),
+            condition,
+        });
+        let (session, ks) = prepare_simple_db().await.unwrap();
+        let start = now();
+        for i in 0..pk_count {
+            populate_simple_db_with_pk(&session, i).await.unwrap();
+        }
+
+        let (_, handle) = CDCLogReaderBuilder::new()
+            .session(session)
+            .keyspace(&ks)
+            .table_name(TEST_TABLE)
+            .start_timestamp(start)
+            .end_timestamp(now())
+            .safety_interval(Duration::from_millis(SAFETY_INTERVAL))
+            .consumer_factory(factory)
+            .build()
+            .await
+            .unwrap();
+
+        match handle.await {
+            Ok(_) => panic!("The handle should have returned an error!"),
+            Err(e) => {
+                if check_message {
+                    assert_eq!(e.to_string(), ERR_MESSAGE);
+                }
+            }
+        };
+    }
+
+    #[tokio::test]
+    async fn test_err_always() {
+        test_err(|_| true, 3, true).await;
+    }
+
+    #[tokio::test]
+    async fn test_err_every_third() {
+        // If fails, try increasing pk_count.
+        test_err(|x| x % 3 == 0, 150, true).await;
+    }
+
+    #[tokio::test]
+    async fn test_panic() {
+        let cond: fn(usize) -> bool = |x| {
+            if x % 2 == 0 {
+                panic!("Lo que pasó, pasó.")
+            }
+            false
+        };
+        // If fails, try increasing pk_count.
+        test_err(cond, 150, false).await;
+    }
+}
