@@ -39,7 +39,7 @@ pub(crate) fn start_saving_checkpoints(
 
                 if checkpoint_saver.save_checkpoint(&checkpoint).await.is_err() {
                     warn!(
-                        "WARN: Saving checkpoint for stream 0x{} failed.",
+                        "Saving checkpoint for stream 0x{} failed.",
                         hex::encode(&checkpoint.stream_id.id)
                     );
                 }
