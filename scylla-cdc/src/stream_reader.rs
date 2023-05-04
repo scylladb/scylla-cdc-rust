@@ -463,14 +463,14 @@ mod tests {
 
             if pk == partition_key_1 as i32 {
                 assert_eq!(pk, partition_key_1 as i32);
-                assert_eq!(t, count1 as i32);
+                assert_eq!(t, count1);
                 assert_eq!(v.to_string(), format!("val{}", count1));
                 assert_eq!(s.to_string(), format!("static{}", count1));
                 count1 += 1;
                 row_count_with_pk1 += 1;
             } else {
                 assert_eq!(pk, partition_key_2 as i32);
-                assert_eq!(t, count2 as i32);
+                assert_eq!(t, count2);
                 assert_eq!(v.to_string(), format!("val{}", count2));
                 assert_eq!(s.to_string(), format!("static{}", count2));
                 count2 += 1;
