@@ -45,7 +45,7 @@ mod tests {
         ks_src: &str,
         ks_dst: &str,
         name: &str,
-        last_read: &mut (u64, i32),
+        last_read: &mut (i64, i32),
     ) -> anyhow::Result<()> {
         let result = session
             .query(
@@ -76,7 +76,7 @@ mod tests {
 
         for log in result.rows.unwrap_or_default() {
             let cdc_row = CDCRow::from_row(log, &schema);
-            let time = cdc_row.time.get_timestamp().unwrap().to_unix_nanos();
+            let time = ReplicatorConsumer::get_timestamp(&cdc_row);
             let batch_seq_no = cdc_row.batch_seq_no;
             if (time, batch_seq_no) > *last_read {
                 *last_read = (time, batch_seq_no);

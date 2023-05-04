@@ -369,9 +369,12 @@ impl ReplicatorConsumer {
         }
     }
 
-    fn get_timestamp(data: &CDCRow<'_>) -> i64 {
-        const NANOS_IN_MILLIS: u64 = 1000;
-        (data.time.get_timestamp().unwrap().to_unix_nanos() / NANOS_IN_MILLIS) as i64
+    /// Retrieves "cdc$time" in microseconds from a `CDCRow` object.
+    /// This can be used to replicate an operation with the exact same timestamp
+    /// as the WRITETIME function returns for a certain column.
+    pub fn get_timestamp(data: &CDCRow<'_>) -> i64 {
+        let (secs, nanos) = data.time.get_timestamp().unwrap().to_unix();
+        (secs * 1_000_000).saturating_add(nanos as u64 / 1_000) as i64
     }
 
     async fn delete_partition(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
