@@ -73,7 +73,9 @@ fn print_row_change_header(data: &CDCRow<'_>) -> String {
     let mut header_to_print = String::new();
     let stream_id = data.stream_id.to_string();
     let (unix_timestamp, _) = data.time.get_timestamp().unwrap().to_unix();
-    let timestamp = NaiveDateTime::from_timestamp(unix_timestamp as i64, 0).to_string();
+    let timestamp = NaiveDateTime::from_timestamp_opt(unix_timestamp as i64, 0)
+        .unwrap()
+        .to_string();
     let operation = data.operation.to_string();
     let batch_seq_no = data.batch_seq_no.to_string();
     let end_of_batch = data.end_of_batch.to_string();
