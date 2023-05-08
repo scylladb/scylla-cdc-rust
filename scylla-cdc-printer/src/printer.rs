@@ -72,8 +72,8 @@ impl ConsumerFactory for PrinterConsumerFactory {
 fn print_row_change_header(data: &CDCRow<'_>) -> String {
     let mut header_to_print = String::new();
     let stream_id = data.stream_id.to_string();
-    let (unix_timestamp, _) = data.time.get_timestamp().unwrap().to_unix();
-    let timestamp = NaiveDateTime::from_timestamp_opt(unix_timestamp as i64, 0)
+    let (secs, nanos) = data.time.get_timestamp().unwrap().to_unix();
+    let timestamp = NaiveDateTime::from_timestamp_opt(secs as i64, nanos)
         .unwrap()
         .to_string();
     let operation = data.operation.to_string();
