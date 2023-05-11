@@ -2,6 +2,12 @@
 name = "scylla-cdc"
 version = "0.1.0"
 edition = "2021"
+description = "Library for consuming ScyllaDB CDC log for Rust"
+repository = "https://github.com/scylladb/scylla-cdc-rust"
+readme = "../README.md"
+keywords = ["database", "scylla", "cdc"]
+categories = ["database"]
+license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
