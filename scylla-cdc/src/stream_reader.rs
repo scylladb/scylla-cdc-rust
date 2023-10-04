@@ -286,7 +286,6 @@ impl StreamReader {
 mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
-    use scylla::frame::types::LegacyConsistency;
     use scylla::query::Query;
     use scylla::transport::errors::QueryError;
     use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
@@ -412,7 +411,7 @@ mod tests {
         ) -> Result<QueryResult, QueryError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {
                 let read_timeout = DbError::ReadTimeout {
-                    consistency: LegacyConsistency::Regular(Default::default()),
+                    consistency: Default::default(),
                     received: 0,
                     required: 0,
                     data_present: false,

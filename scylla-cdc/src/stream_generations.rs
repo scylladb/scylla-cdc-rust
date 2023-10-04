@@ -1,10 +1,10 @@
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
-use scylla::batch::Consistency;
 use scylla::frame::response::result::Row;
 use scylla::frame::value::Timestamp;
 use scylla::query::Query;
+use scylla::statement::Consistency;
 use scylla::{IntoTypedRows, Session};
 use std::sync::Arc;
 use std::time;
