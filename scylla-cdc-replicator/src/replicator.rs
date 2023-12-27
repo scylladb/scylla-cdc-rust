@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time;
 
+use chrono::{DateTime, Utc};
 use futures_util::future::RemoteHandle;
 use futures_util::stream::FuturesUnordered;
 use scylla::SessionBuilder;
@@ -21,7 +22,7 @@ impl Replicator {
         dest_uri: String,
         dest_keyspace: String,
         dest_tables: Vec<String>,
-        start_timestamp: chrono::Duration,
+        start_timestamp: DateTime<Utc>,
         window_size: time::Duration,
         safety_interval: time::Duration,
         sleep_interval: time::Duration,

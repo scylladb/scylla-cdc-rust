@@ -1,10 +1,11 @@
+use chrono::{DateTime, Utc};
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
-use scylla::batch::Consistency;
 use scylla::frame::response::result::Row;
-use scylla::frame::value::Timestamp;
+use scylla::frame::value::CqlTimestamp;
 use scylla::query::Query;
+use scylla::statement::Consistency;
 use scylla::{IntoTypedRows, Session};
 use std::sync::Arc;
 use std::time;
@@ -88,13 +89,17 @@ impl GenerationFetcher {
     /// Propagates errors.
     pub async fn fetch_generation_by_timestamp(
         &self,
-        time: &chrono::Duration,
+        time: &DateTime<Utc>,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query =
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
                 .await?;
 
-        let result = self.session.query(query, (Timestamp(*time),)).await?.rows;
+        let result = self
+            .session
+            .query(query, (CqlTimestamp(time.timestamp_millis()),))
+            .await?
+            .rows;
 
         GenerationFetcher::return_single_row(result)
     }
@@ -181,7 +186,7 @@ impl GenerationFetcher {
 
     pub async fn fetch_generations_continuously(
         self: Arc<Self>,
-        start_timestamp: chrono::Duration,
+        start_timestamp: DateTime<Utc>,
         sleep_interval: time::Duration,
     ) -> anyhow::Result<(mpsc::Receiver<GenerationTimestamp>, RemoteHandle<()>)> {
         let (generation_sender, generation_receiver) = mpsc::channel(1);
@@ -263,6 +268,7 @@ async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use scylla_cdc_test_utils::prepare_db;
 
     use super::*;
@@ -325,18 +331,14 @@ mod tests {
         .unwrap();
 
         session
-            .query(
-                query,
-                (Timestamp(chrono::Duration::milliseconds(generation)),),
-            )
+            .query(query, (CqlTimestamp(generation),))
             .await
             .unwrap();
     }
 
     // Populate test tables with given data.
     async fn populate_test_db(session: &Session) {
-        let stream_generation =
-            Timestamp(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS));
+        let stream_generation = CqlTimestamp(GENERATION_NEW_MILLISECONDS);
 
         for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
             insert_generation_timestamp(session, *generation).await;
@@ -379,10 +381,14 @@ mod tests {
 
         let correct_gen = vec![
             GenerationTimestamp {
-                timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+                timestamp: Utc
+                    .timestamp_millis_opt(GENERATION_NEW_MILLISECONDS)
+                    .unwrap(),
             },
             GenerationTimestamp {
-                timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+                timestamp: Utc
+                    .timestamp_millis_opt(GENERATION_OLD_MILLISECONDS)
+                    .unwrap(),
             },
         ];
 
@@ -419,7 +425,7 @@ mod tests {
         );
 
         for i in 0..timestamp_ms_vec.len() {
-            let timestamp = chrono::Duration::milliseconds(timestamp_ms_vec[i]);
+            let timestamp = Utc.timestamp_millis_opt(timestamp_ms_vec[i]).unwrap();
 
             let gen = fetcher
                 .fetch_generation_by_timestamp(&timestamp)
@@ -429,7 +435,7 @@ mod tests {
             assert_eq!(
                 gen,
                 correct_generation_vec[i].map(|gen_ms| GenerationTimestamp {
-                    timestamp: chrono::Duration::milliseconds(gen_ms)
+                    timestamp: Utc.timestamp_millis_opt(gen_ms).unwrap()
                 }),
             );
         }
@@ -448,7 +454,9 @@ mod tests {
         assert_eq!(
             gen_old_next.unwrap(),
             GenerationTimestamp {
-                timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS)
+                timestamp: Utc
+                    .timestamp_millis_opt(GENERATION_NEW_MILLISECONDS)
+                    .unwrap()
             }
         );
     }
@@ -458,10 +466,14 @@ mod tests {
         let fetcher = setup().await.unwrap();
 
         let gen_before_all_others = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
+            timestamp: Utc
+                .timestamp_millis_opt(GENERATION_OLD_MILLISECONDS - 1)
+                .unwrap(),
         };
         let first_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+            timestamp: Utc
+                .timestamp_millis_opt(GENERATION_OLD_MILLISECONDS)
+                .unwrap(),
         };
         let gen_before_others_next = fetcher
             .fetch_next_generation(&gen_before_all_others)
@@ -475,7 +487,9 @@ mod tests {
         let fetcher = setup().await.unwrap();
 
         let gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+            timestamp: Utc
+                .timestamp_millis_opt(GENERATION_NEW_MILLISECONDS)
+                .unwrap(),
         };
 
         let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
@@ -502,18 +516,23 @@ mod tests {
 
         let (mut generation_receiver, _future) = Arc::new(fetcher)
             .fetch_generations_continuously(
-                chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
+                Utc.timestamp_millis_opt(GENERATION_OLD_MILLISECONDS - 1)
+                    .unwrap(),
                 time::Duration::from_millis(100),
             )
             .await
             .unwrap();
 
         let first_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+            timestamp: Utc
+                .timestamp_millis_opt(GENERATION_OLD_MILLISECONDS)
+                .unwrap(),
         };
 
         let next_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+            timestamp: Utc
+                .timestamp_millis_opt(GENERATION_NEW_MILLISECONDS)
+                .unwrap(),
         };
 
         let generation = generation_receiver.recv().await.unwrap();
@@ -523,7 +542,9 @@ mod tests {
         assert_eq!(generation, next_gen);
 
         let new_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS + 100),
+            timestamp: Utc
+                .timestamp_millis_opt(GENERATION_NEW_MILLISECONDS + 100)
+                .unwrap(),
         };
 
         insert_generation_timestamp(&session, GENERATION_NEW_MILLISECONDS + 100).await;
