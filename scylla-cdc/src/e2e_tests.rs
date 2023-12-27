@@ -9,13 +9,14 @@ mod tests {
 
     use anyhow::{bail, Result};
     use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
     use futures::future::RemoteHandle;
     use itertools::{repeat_n, Itertools};
     use scylla::frame::response::result::CqlValue;
     use scylla::frame::value::{Value, ValueTooBig};
     use scylla::prepared_statement::PreparedStatement;
     use scylla::Session;
-    use scylla_cdc_test_utils::{now, prepare_db};
+    use scylla_cdc_test_utils::prepare_db;
     use tokio::sync::Mutex;
 
     use crate::checkpoints::TableBackedCheckpointSaver;
@@ -286,10 +287,10 @@ mod tests {
             results.into_iter().all(identity)
         }
 
-        async fn test_cdc(mut self, start: chrono::Duration) -> Result<()> {
+        async fn test_cdc(mut self, start: DateTime<Utc>) -> Result<()> {
             let results = Arc::new(Mutex::new(HashMap::new()));
             let factory = Arc::new(TestConsumerFactory::new(Arc::clone(&results)));
-            let end = now();
+            let end = Utc::now();
 
             let (_tester, handle) = CDCLogReaderBuilder::new()
                 .session(Arc::clone(&self.session))
@@ -321,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn e2e_test_small() {
         let mut test = Test::new("int_small_test", vec!["int"]).await.unwrap();
-        let start = now();
+        let start = Utc::now();
 
         for i in 0..10 {
             for j in (3..6).rev() {
@@ -345,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn e2e_test_int_pk() {
         let mut test = Test::new("int_test", vec!["int"]).await.unwrap();
-        let start = now();
+        let start = Utc::now();
 
         for i in 0..100 {
             for j in (300..400).rev() {
@@ -372,7 +373,7 @@ mod tests {
             .await
             .unwrap();
         let strings = vec!["blep".to_string(), "nghu".to_string(), "pkeee".to_string()];
-        let start = now();
+        let start = Utc::now();
 
         for i in 0..100 {
             for j in (300..400).rev() {
@@ -410,8 +411,8 @@ mod tests {
     async fn create_reader_with_saving(
         test: &Test,
         factory: &Arc<TestConsumerFactory>,
-        start: chrono::Duration,
-        end: chrono::Duration,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
     ) -> RemoteHandle<Result<()>> {
         let default_cp_saver = Arc::new(
             TableBackedCheckpointSaver::new(
@@ -459,7 +460,7 @@ mod tests {
     async fn e2e_test_saving_progress_complex() {
         const N: i32 = 5;
         let table_name = "test_saving_progress";
-        let start = now();
+        let start = Utc::now();
 
         let mut test = Test::new(table_name, vec!["int"]).await.unwrap();
 
@@ -468,7 +469,7 @@ mod tests {
 
         for i in 0..N {
             insert_new_rows_for_saving_test(&mut test, i).await;
-            let end = now();
+            let end = Utc::now();
 
             let handle = create_reader_with_saving(
                 &test,
