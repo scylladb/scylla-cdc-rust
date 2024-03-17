@@ -11,9 +11,11 @@ mod tests {
     use async_trait::async_trait;
     use futures::future::RemoteHandle;
     use itertools::{repeat_n, Itertools};
-    use scylla::frame::response::result::CqlValue;
-    use scylla::frame::value::{Value, ValueTooBig};
+    use scylla::frame::response::result::{ColumnType, CqlValue};
     use scylla::prepared_statement::PreparedStatement;
+    use scylla::serialize::value::SerializeCql;
+    use scylla::serialize::writers::WrittenCellProof;
+    use scylla::serialize::{CellWriter, SerializationError};
     use scylla::Session;
     use scylla_cdc_test_utils::{now, prepare_db};
     use tokio::sync::Mutex;
@@ -38,11 +40,9 @@ mod tests {
         List(Vec<PrimaryKeyValue>),
     }
 
-    impl Value for PrimaryKeyValue {
-        fn serialize(&self, buf: &mut Vec<u8>) -> Result<(), ValueTooBig> {
-            self.to_cql().serialize(buf)?;
-
-            Ok(())
+    impl SerializeCql for PrimaryKeyValue {
+        fn serialize<'b>(&self, typ: &ColumnType, writer: CellWriter<'b>) -> Result<WrittenCellProof<'b>, SerializationError> {
+            self.to_cql().serialize(typ, writer)
         }
     }
 

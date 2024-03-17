@@ -4,7 +4,7 @@ use anyhow;
 use async_trait::async_trait;
 use futures::future::RemoteHandle;
 use futures::FutureExt;
-use scylla::frame::response::result::CqlValue::Timestamp;
+use scylla::frame::value;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::Session;
 use std::sync::Arc;
@@ -157,7 +157,7 @@ fn get_checkpoint_table_schema(table_name: &str) -> String {
 impl CDCCheckpointSaver for TableBackedCheckpointSaver {
     /// Writes new record containing given timestamp to the checkpoint table.
     async fn save_checkpoint(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
-        let timestamp = Timestamp(chrono::Duration::from_std(checkpoint.timestamp)?);
+        let timestamp = value::CqlTimestamp(checkpoint.timestamp.as_millis() as i64);
 
         self.session
             .execute(
@@ -171,7 +171,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 
     async fn save_new_generation(&self, generation: &GenerationTimestamp) -> anyhow::Result<()> {
         let marked_stream_id = get_default_generation_pk();
-        let dummy_timestamp = Timestamp(chrono::Duration::max_value());
+        let dummy_timestamp = value::CqlTimestamp(i64::MAX);
 
         self.session
             .execute(
@@ -218,8 +218,8 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
                 (stream_id,),
             )
             .await?
-            .maybe_first_row_typed::<(chrono::Duration,)>()?
-            .map(|time| time.0))
+            .maybe_first_row_typed::<(value::CqlTimestamp,)>()?
+            .map(|t| chrono::Duration::milliseconds(t.0.0)))
     }
 }
 
@@ -228,6 +228,7 @@ mod tests {
     use crate::cdc_types::{GenerationTimestamp, StreamID};
     use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, TableBackedCheckpointSaver};
     use rand::prelude::*;
+    use scylla::frame::value;
     use scylla::{IntoTypedRows, Session};
     use scylla_cdc_test_utils::{prepare_db, unique_name};
     use std::ops::Add;
@@ -255,13 +256,13 @@ mod tests {
             .unwrap()
             .rows()
             .unwrap()
-            .into_typed::<(StreamID, chrono::Duration, chrono::Duration)>()
+            .into_typed::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()
             .map(|x| x.unwrap())
             .map(|(id, gen, time)| -> Checkpoint {
                 Checkpoint {
                     stream_id: id,
-                    generation: GenerationTimestamp { timestamp: gen },
-                    timestamp: time.to_std().unwrap(),
+                    generation: gen,
+                    timestamp: Duration::from_millis(time.0 as u64),
                 }
             })
             .collect::<Vec<Checkpoint>>()

@@ -1,10 +1,10 @@
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
-use scylla::batch::Consistency;
 use scylla::frame::response::result::Row;
-use scylla::frame::value::Timestamp;
+use scylla::frame::value;
 use scylla::query::Query;
+use scylla::statement::Consistency;
 use scylla::{IntoTypedRows, Session};
 use std::sync::Arc;
 use std::time;
@@ -94,7 +94,7 @@ impl GenerationFetcher {
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
                 .await?;
 
-        let result = self.session.query(query, (Timestamp(*time),)).await?.rows;
+        let result = self.session.query(query, (value::CqlTimestamp(time.num_milliseconds()),)).await?.rows;
 
         GenerationFetcher::return_single_row(result)
     }
@@ -327,7 +327,7 @@ mod tests {
         session
             .query(
                 query,
-                (Timestamp(chrono::Duration::milliseconds(generation)),),
+                (value::CqlTimestamp(generation),),
             )
             .await
             .unwrap();
@@ -336,7 +336,7 @@ mod tests {
     // Populate test tables with given data.
     async fn populate_test_db(session: &Session) {
         let stream_generation =
-            Timestamp(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS));
+            value::CqlTimestamp(GENERATION_NEW_MILLISECONDS);
 
         for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
             insert_generation_timestamp(session, *generation).await;
