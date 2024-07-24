@@ -41,7 +41,11 @@ mod tests {
     }
 
     impl SerializeCql for PrimaryKeyValue {
-        fn serialize<'b>(&self, typ: &ColumnType, writer: CellWriter<'b>) -> Result<WrittenCellProof<'b>, SerializationError> {
+        fn serialize<'b>(
+            &self,
+            typ: &ColumnType,
+            writer: CellWriter<'b>,
+        ) -> Result<WrittenCellProof<'b>, SerializationError> {
             self.to_cql().serialize(typ, writer)
         }
     }

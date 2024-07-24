@@ -94,7 +94,11 @@ impl GenerationFetcher {
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
                 .await?;
 
-        let result = self.session.query(query, (value::CqlTimestamp(time.num_milliseconds()),)).await?.rows;
+        let result = self
+            .session
+            .query(query, (value::CqlTimestamp(time.num_milliseconds()),))
+            .await?
+            .rows;
 
         GenerationFetcher::return_single_row(result)
     }
@@ -325,18 +329,14 @@ mod tests {
         .unwrap();
 
         session
-            .query(
-                query,
-                (value::CqlTimestamp(generation),),
-            )
+            .query(query, (value::CqlTimestamp(generation),))
             .await
             .unwrap();
     }
 
     // Populate test tables with given data.
     async fn populate_test_db(session: &Session) {
-        let stream_generation =
-            value::CqlTimestamp(GENERATION_NEW_MILLISECONDS);
+        let stream_generation = value::CqlTimestamp(GENERATION_NEW_MILLISECONDS);
 
         for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
             insert_generation_timestamp(session, *generation).await;
