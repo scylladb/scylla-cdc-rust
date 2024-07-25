@@ -77,25 +77,8 @@ mod tests {
         for mut log in result.rows.unwrap_or_default() {
             // handling udt specific, replacing src keyspace with dst keyspace
             for col_opt in log.columns.iter_mut() {
-                let new_udt = if let Some(col) = col_opt {
-                    match col {
-                        UserDefinedType {
-                            keyspace: _,
-                            type_name,
-                            fields,
-                        } => Some(UserDefinedType {
-                            keyspace: ks_dst.to_string(),
-                            type_name: type_name.clone(),
-                            fields: fields.clone(),
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(new_col) = new_udt {
-                    col_opt.replace(new_col);
+                if let Some(UserDefinedType { keyspace, .. }) = col_opt {
+                    *keyspace = ks_dst.to_string();
                 }
             }
             let cdc_row = CDCRow::from_row(log, &schema);
