@@ -59,10 +59,10 @@ impl GenerationFetcher {
             .session
             .query_iter(query, &[])
             .await?
-            .into_typed::<GenerationTimestamp>();
+            .into_typed::<(GenerationTimestamp,)>();
 
         while let Some(generation) = rows.next().await {
-            generations.push(generation?)
+            generations.push(generation?.0)
         }
 
         Ok(generations)
@@ -175,8 +175,8 @@ impl GenerationFetcher {
     // Return single row containing generation.
     fn return_single_row(row: Option<Vec<Row>>) -> anyhow::Result<Option<GenerationTimestamp>> {
         if let Some(row) = row {
-            if let Some(generation) = row.into_typed::<GenerationTimestamp>().next() {
-                return Ok(Some(generation?));
+            if let Some(generation) = row.into_typed::<(GenerationTimestamp,)>().next() {
+                return Ok(Some(generation?.0));
             }
         }
 

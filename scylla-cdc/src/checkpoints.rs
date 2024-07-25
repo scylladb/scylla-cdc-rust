@@ -196,7 +196,8 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
                 (get_default_generation_pk(),),
             )
             .await?
-            .maybe_first_row_typed::<GenerationTimestamp>()?;
+            .maybe_first_row_typed::<(GenerationTimestamp,)>()?
+            .map(|row| row.0);
 
         Ok(generation)
     }
@@ -219,7 +220,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
             )
             .await?
             .maybe_first_row_typed::<(value::CqlTimestamp,)>()?
-            .map(|t| chrono::Duration::milliseconds(t.0.0)))
+            .map(|t| chrono::Duration::milliseconds(t.0 .0)))
     }
 }
 

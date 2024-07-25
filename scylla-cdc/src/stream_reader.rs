@@ -359,11 +359,11 @@ mod tests {
         let mut rows = session
             .query_iter(query_stream_id, ())
             .await?
-            .into_typed::<StreamID>();
+            .into_typed::<(StreamID,)>();
 
         let mut stream_ids_vec = Vec::new();
         while let Some(row) = rows.next().await {
-            let casted_row = row?;
+            let casted_row = row?.0;
             stream_ids_vec.push(casted_row);
         }
 
