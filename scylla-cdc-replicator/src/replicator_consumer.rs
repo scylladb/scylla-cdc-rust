@@ -469,7 +469,7 @@ impl ReplicatorConsumer {
         &mut self,
         column_name: &str,
         data: &'a CDCRow<'_>,
-        values_for_update: &mut [Option<&'a CqlValue>],
+        values_for_update: &mut [Option<CqlValue>],
         pk_values: &[Option<&CqlValue>],
         timestamp: i64,
     ) -> anyhow::Result<()> {
@@ -482,41 +482,29 @@ impl ReplicatorConsumer {
         if let Some(added_elements) = data.get_value(column_name) {
             let added_elements = added_elements.as_map().unwrap();
             for (key, val) in added_elements {
-                let mut inner_values_for_update = Vec::new();
-                values_for_update.clone_into(&mut inner_values_for_update);
-                let mut key_actual = None;
                 let key = match key {
-                    CqlValue::Timeuuid(u) => {
-                        key_actual.replace(CqlValue::Uuid((*u).into()));
-                        key_actual.as_ref()
-                    }
-                    _ => Some(key),
+                    CqlValue::Timeuuid(u) => Some(CqlValue::Uuid((*u).into())),
+                    _ => unreachable!(),
                 };
-                inner_values_for_update[1] = key;
-                inner_values_for_update[2] = Some(val);
+                values_for_update[1] = key;
+                values_for_update[2] = Some(val.clone());
 
                 self.precomputed_queries
-                    .update_list_elements(&*inner_values_for_update, timestamp, column_name)
+                    .update_list_elements(&*values_for_update, timestamp, column_name)
                     .await?;
             }
         }
 
         for removed in data.get_deleted_elements(column_name) {
-            let mut inner_values_for_update = Vec::new();
-            values_for_update.clone_into(&mut inner_values_for_update);
-            let mut removed_actual = None;
             let removed = match removed {
-                CqlValue::Timeuuid(u) => {
-                    removed_actual.replace(CqlValue::Uuid((*u).into()));
-                    removed_actual.as_ref()
-                }
-                _ => Some(removed),
+                CqlValue::Timeuuid(u) => Some(CqlValue::Uuid((*u).into())),
+                _ => unreachable!(),
             };
-            inner_values_for_update[1] = removed;
-            inner_values_for_update[2] = None;
+            values_for_update[1] = removed;
+            values_for_update[2] = None;
 
             self.precomputed_queries
-                .update_list_elements(&*inner_values_for_update, timestamp, column_name)
+                .update_list_elements(&*values_for_update, timestamp, column_name)
                 .await?;
         }
 
@@ -762,8 +750,8 @@ impl ReplicatorConsumer {
         values_for_update.extend(values.iter());
 
         let mut values_for_list_update = Vec::with_capacity(3 + values.len());
-        values_for_list_update.extend([Some(&ttl), None, None]);
-        values_for_list_update.extend(values.iter());
+        values_for_list_update.extend([Some(ttl.clone()), None, None]);
+        values_for_list_update.extend(values.iter().map(|o| o.cloned()));
 
         for column_name in &self.source_table_data.non_key_columns.clone() {
             match &self
