@@ -6,7 +6,7 @@ use std::time;
 
 use async_trait::async_trait;
 use itertools::Itertools;
-use scylla::frame::value::Timestamp;
+use scylla::frame::value;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::{DbError, QueryError};
 use scylla::{Bytes, QueryResult, Session};
@@ -41,8 +41,8 @@ trait StreamSession: Sync + Send {
         &self,
         statement: &PreparedStatement,
         ids: &[StreamID],
-        window_begin: &Timestamp,
-        window_end: &Timestamp,
+        window_begin: &value::CqlTimestamp,
+        window_end: &value::CqlTimestamp,
         paging_state: Option<Bytes>,
     ) -> Result<QueryResult, QueryError>;
 }
@@ -57,8 +57,8 @@ impl StreamSession for Session {
         &self,
         statement: &PreparedStatement,
         ids: &[StreamID],
-        window_begin: &Timestamp,
-        window_end: &Timestamp,
+        window_begin: &value::CqlTimestamp,
+        window_end: &value::CqlTimestamp,
         paging_state: Option<Bytes>,
     ) -> Result<QueryResult, QueryError> {
         self.execute_paged(statement, (ids, window_begin, window_end), paging_state)
@@ -161,8 +161,8 @@ impl StreamReader {
             self.fetch_and_consume_rows(
                 &query_base,
                 &mut consumer,
-                Timestamp(window_begin),
-                Timestamp(window_end),
+                value::CqlTimestamp(window_begin.num_milliseconds()),
+                value::CqlTimestamp(window_end.num_milliseconds()),
             )
             .await?;
 
@@ -194,8 +194,8 @@ impl StreamReader {
         &self,
         query_base: &PreparedStatement,
         consumer: &mut Box<dyn Consumer>,
-        window_begin: Timestamp,
-        window_end: Timestamp,
+        window_begin: value::CqlTimestamp,
+        window_end: value::CqlTimestamp,
     ) -> anyhow::Result<()> {
         let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
 
@@ -258,8 +258,8 @@ impl StreamReader {
 
     async fn print_timeout_warning(
         &self,
-        window_begin: &Timestamp,
-        window_end: &Timestamp,
+        window_begin: &value::CqlTimestamp,
+        window_end: &value::CqlTimestamp,
         backoff: u128,
         page_no: u64,
     ) {
@@ -272,8 +272,8 @@ impl StreamReader {
 
             warn!(
                 stream_ids = ids_str,
-                window_begin_ms = window_begin.0.num_milliseconds(),
-                window_end_ms = window_end.0.num_milliseconds(),
+                window_begin_ms = window_begin.0,
+                window_end_ms = window_end.0,
                 page_no = page_no,
                 current_backoff = backoff,
                 "Timeout while fetching CDC rows."
@@ -286,7 +286,6 @@ impl StreamReader {
 mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
-    use scylla::frame::types::LegacyConsistency;
     use scylla::query::Query;
     use scylla::transport::errors::QueryError;
     use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
@@ -360,11 +359,11 @@ mod tests {
         let mut rows = session
             .query_iter(query_stream_id, ())
             .await?
-            .into_typed::<StreamID>();
+            .into_typed::<(StreamID,)>();
 
         let mut stream_ids_vec = Vec::new();
         while let Some(row) = rows.next().await {
-            let casted_row = row?;
+            let casted_row = row?.0;
             stream_ids_vec.push(casted_row);
         }
 
@@ -406,13 +405,13 @@ mod tests {
             &self,
             statement: &PreparedStatement,
             ids: &[StreamID],
-            window_begin: &Timestamp,
-            window_end: &Timestamp,
+            window_begin: &value::CqlTimestamp,
+            window_end: &value::CqlTimestamp,
             paging_state: Option<Bytes>,
         ) -> Result<QueryResult, QueryError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {
                 let read_timeout = DbError::ReadTimeout {
-                    consistency: LegacyConsistency::Regular(Default::default()),
+                    consistency: Default::default(),
                     received: 0,
                     required: 0,
                     data_present: false,

@@ -1,22 +1,22 @@
 [package]
 name = "scylla-cdc-replicator"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-scylla = "0.8.1"
+scylla = "0.13.1"
 scylla-cdc = { version = "0.1.0", path = "../scylla-cdc" }
 tokio = { version = "1.1.0", features = ["full"] }
 async-trait = "0.1.51"
 anyhow = "1.0.48"
-itertools = "0.10.3"
+itertools = "0.13.0"
 uuid = {version = "1.0.0", features = ["v1"]}
 futures-util = "0.3.19"
 tracing = "0.1.34"
 chrono = "0.4.19"
-clap = { version = "3.2", features = ["derive"] }
+clap = { version = "4.5.9", features = ["derive"] }
 
 [dev-dependencies]
 scylla-cdc-test-utils = { path = "../scylla-cdc-test-utils" }

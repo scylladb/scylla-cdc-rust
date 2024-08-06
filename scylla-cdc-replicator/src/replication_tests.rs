@@ -74,7 +74,13 @@ mod tests {
 
         let schema = CDCRowSchema::new(&result.col_specs);
 
-        for log in result.rows.unwrap_or_default() {
+        for mut log in result.rows.unwrap_or_default() {
+            // handling udt specific, replacing src keyspace with dst keyspace
+            for col_opt in log.columns.iter_mut().flatten() {
+                if let UserDefinedType { keyspace, .. } = col_opt {
+                    *keyspace = ks_dst.to_string();
+                }
+            }
             let cdc_row = CDCRow::from_row(log, &schema);
             let time = ReplicatorConsumer::get_timestamp(&cdc_row);
             let batch_seq_no = cdc_row.batch_seq_no;

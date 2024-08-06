@@ -1,19 +1,19 @@
 [package]
 name = "scylla-cdc-printer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-scylla = "0.8.1"
+scylla = "0.13.1"
 scylla-cdc = { version = "0.1.0", path = "../scylla-cdc" }
 tokio = { version = "1.1.0", features = ["full"] }
 chrono = "0.4.19"
 futures = "0.3.17"
 anyhow = "1.0.51"
 async-trait = "0.1.52"
-clap = { version = "3.2", features = ["derive"] }
+clap = { version = "4.5.9", features = ["derive"] }
 
 [dev-dependencies]
 scylla-cdc-test-utils = { path = "../scylla-cdc-test-utils" }

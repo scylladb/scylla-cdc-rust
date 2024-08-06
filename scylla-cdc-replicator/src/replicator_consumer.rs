@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::frame::response::result::CqlValue;
 use scylla::frame::response::result::CqlValue::{Map, Set};
-use scylla::frame::value::Value;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::query::Query;
+use scylla::serialize::row::SerializeRow;
 use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
 use scylla::Session;
 use tracing::warn;
@@ -31,7 +31,7 @@ impl PreparedStatementCache {
     pub async fn run_query(
         &mut self,
         session: &Arc<Session>,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
         str_param: &str,
     ) -> anyhow::Result<()> {
@@ -163,7 +163,7 @@ impl PrecomputedQueries {
 
     async fn delete_partition(
         &mut self,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
     ) -> anyhow::Result<()> {
         run_prepared_statement(
@@ -175,7 +175,11 @@ impl PrecomputedQueries {
         .await
     }
 
-    async fn insert_value(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+    async fn insert_value(
+        &mut self,
+        values: impl SerializeRow,
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
         run_prepared_statement(
             &self.destination_table_params.session,
             self.insert_query.clone(),
@@ -185,7 +189,11 @@ impl PrecomputedQueries {
         .await
     }
 
-    async fn delete_row(&mut self, values: &[impl Value], timestamp: i64) -> anyhow::Result<()> {
+    async fn delete_row(
+        &mut self,
+        values: impl SerializeRow,
+        timestamp: i64,
+    ) -> anyhow::Result<()> {
         run_prepared_statement(
             &self.destination_table_params.session,
             self.delete_query.clone(),
@@ -197,7 +205,7 @@ impl PrecomputedQueries {
 
     async fn overwrite_value(
         &mut self,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
@@ -213,7 +221,7 @@ impl PrecomputedQueries {
 
     async fn delete_value(
         &mut self,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
@@ -232,7 +240,7 @@ impl PrecomputedQueries {
 
     async fn update_map_or_set_elements(
         &mut self,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
@@ -248,7 +256,7 @@ impl PrecomputedQueries {
 
     async fn delete_list_value(
         &mut self,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
@@ -263,7 +271,7 @@ impl PrecomputedQueries {
 
     async fn update_list_elements(
         &mut self,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
         column_name: &str,
     ) -> anyhow::Result<()> {
@@ -282,7 +290,7 @@ impl PrecomputedQueries {
     async fn update_udt_elements(
         &mut self,
         element_name: &str,
-        values: &[impl Value],
+        values: impl SerializeRow,
         timestamp: i64,
     ) -> anyhow::Result<()> {
         self.overwrite_queries
@@ -299,7 +307,7 @@ impl PrecomputedQueries {
 async fn run_prepared_statement(
     session: &Arc<Session>,
     mut query: PreparedStatement,
-    values: &[impl Value],
+    values: impl SerializeRow,
     timestamp: i64,
 ) -> anyhow::Result<()> {
     query.set_timestamp(Some(timestamp));
@@ -311,7 +319,7 @@ async fn run_prepared_statement(
 async fn run_statement(
     session: &Arc<Session>,
     mut query: Query,
-    values: &[impl Value],
+    values: impl SerializeRow,
     timestamp: i64,
 ) -> anyhow::Result<()> {
     query.set_timestamp(Some(timestamp));
@@ -474,21 +482,41 @@ impl ReplicatorConsumer {
         if let Some(added_elements) = data.get_value(column_name) {
             let added_elements = added_elements.as_map().unwrap();
             for (key, val) in added_elements {
-                values_for_update[1] = Some(key);
-                values_for_update[2] = Some(val);
+                let mut inner_values_for_update = Vec::new();
+                values_for_update.clone_into(&mut inner_values_for_update);
+                let mut key_actual = None;
+                let key = match key {
+                    CqlValue::Timeuuid(u) => {
+                        key_actual.replace(CqlValue::Uuid((*u).into()));
+                        key_actual.as_ref()
+                    }
+                    _ => Some(key),
+                };
+                inner_values_for_update[1] = key;
+                inner_values_for_update[2] = Some(val);
 
                 self.precomputed_queries
-                    .update_list_elements(values_for_update, timestamp, column_name)
+                    .update_list_elements(&*inner_values_for_update, timestamp, column_name)
                     .await?;
             }
         }
 
         for removed in data.get_deleted_elements(column_name) {
-            values_for_update[1] = Some(removed);
-            values_for_update[2] = None;
+            let mut inner_values_for_update = Vec::new();
+            values_for_update.clone_into(&mut inner_values_for_update);
+            let mut removed_actual = None;
+            let removed = match removed {
+                CqlValue::Timeuuid(u) => {
+                    removed_actual.replace(CqlValue::Uuid((*u).into()));
+                    removed_actual.as_ref()
+                }
+                _ => Some(removed),
+            };
+            inner_values_for_update[1] = removed;
+            inner_values_for_update[2] = None;
 
             self.precomputed_queries
-                .update_list_elements(values_for_update, timestamp, column_name)
+                .update_list_elements(&*inner_values_for_update, timestamp, column_name)
                 .await?;
         }
 
@@ -517,7 +545,7 @@ impl ReplicatorConsumer {
                 // Order of values: ttl, updated element, pk condition values.
                 values_for_update[1] = value.as_ref();
                 self.precomputed_queries
-                    .update_udt_elements(&element_name, values_for_update, timestamp)
+                    .update_udt_elements(&element_name, &*values_for_update, timestamp)
                     .await?;
             }
         }
@@ -704,7 +732,7 @@ impl ReplicatorConsumer {
             // Order of values: ttl, inserted value, pk condition values.
             values_for_update[1] = value.as_ref();
             self.precomputed_queries
-                .overwrite_value(values_for_update, timestamp, column_name)
+                .overwrite_value(&*values_for_update, timestamp, column_name)
                 .await?;
         } else if data.is_value_deleted(column_name) {
             self.precomputed_queries

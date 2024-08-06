@@ -1,10 +1,10 @@
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
-use scylla::batch::Consistency;
 use scylla::frame::response::result::Row;
-use scylla::frame::value::Timestamp;
+use scylla::frame::value;
 use scylla::query::Query;
+use scylla::statement::Consistency;
 use scylla::{IntoTypedRows, Session};
 use std::sync::Arc;
 use std::time;
@@ -59,10 +59,10 @@ impl GenerationFetcher {
             .session
             .query_iter(query, &[])
             .await?
-            .into_typed::<GenerationTimestamp>();
+            .into_typed::<(GenerationTimestamp,)>();
 
         while let Some(generation) = rows.next().await {
-            generations.push(generation?)
+            generations.push(generation?.0)
         }
 
         Ok(generations)
@@ -94,7 +94,11 @@ impl GenerationFetcher {
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
                 .await?;
 
-        let result = self.session.query(query, (Timestamp(*time),)).await?.rows;
+        let result = self
+            .session
+            .query(query, (value::CqlTimestamp(time.num_milliseconds()),))
+            .await?
+            .rows;
 
         GenerationFetcher::return_single_row(result)
     }
@@ -171,8 +175,8 @@ impl GenerationFetcher {
     // Return single row containing generation.
     fn return_single_row(row: Option<Vec<Row>>) -> anyhow::Result<Option<GenerationTimestamp>> {
         if let Some(row) = row {
-            if let Some(generation) = row.into_typed::<GenerationTimestamp>().next() {
-                return Ok(Some(generation?));
+            if let Some(generation) = row.into_typed::<(GenerationTimestamp,)>().next() {
+                return Ok(Some(generation?.0));
             }
         }
 
@@ -325,18 +329,14 @@ mod tests {
         .unwrap();
 
         session
-            .query(
-                query,
-                (Timestamp(chrono::Duration::milliseconds(generation)),),
-            )
+            .query(query, (value::CqlTimestamp(generation),))
             .await
             .unwrap();
     }
 
     // Populate test tables with given data.
     async fn populate_test_db(session: &Session) {
-        let stream_generation =
-            Timestamp(chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS));
+        let stream_generation = value::CqlTimestamp(GENERATION_NEW_MILLISECONDS);
 
         for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
             insert_generation_timestamp(session, *generation).await;
@@ -396,7 +396,7 @@ mod tests {
         let fetcher = setup().await.unwrap();
 
         // Input.
-        let timestamp_ms_vec = vec![
+        let timestamps_ms = [
             GENERATION_OLD_MILLISECONDS - 1,
             GENERATION_OLD_MILLISECONDS,
             (GENERATION_NEW_MILLISECONDS + GENERATION_OLD_MILLISECONDS) / 2,
@@ -404,7 +404,7 @@ mod tests {
             GENERATION_NEW_MILLISECONDS + 1,
         ];
         // Expected output.
-        let correct_generation_vec = vec![
+        let correct_generations = [
             None,
             Some(GENERATION_OLD_MILLISECONDS),
             Some(GENERATION_OLD_MILLISECONDS),
@@ -413,13 +413,13 @@ mod tests {
         ];
 
         assert_eq!(
-            timestamp_ms_vec.len(),
-            correct_generation_vec.len(),
+            timestamps_ms.len(),
+            correct_generations.len(),
             "These two vectors should have the same length."
         );
 
-        for i in 0..timestamp_ms_vec.len() {
-            let timestamp = chrono::Duration::milliseconds(timestamp_ms_vec[i]);
+        for i in 0..timestamps_ms.len() {
+            let timestamp = chrono::Duration::milliseconds(timestamps_ms[i]);
 
             let gen = fetcher
                 .fetch_generation_by_timestamp(&timestamp)
@@ -428,7 +428,7 @@ mod tests {
 
             assert_eq!(
                 gen,
-                correct_generation_vec[i].map(|gen_ms| GenerationTimestamp {
+                correct_generations[i].map(|gen_ms| GenerationTimestamp {
                     timestamp: chrono::Duration::milliseconds(gen_ms)
                 }),
             );
@@ -480,7 +480,7 @@ mod tests {
 
         let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
 
-        let correct_stream_ids: Vec<Vec<StreamID>> = vec![[TEST_STREAM_1, TEST_STREAM_2]]
+        let correct_stream_ids: Vec<Vec<StreamID>> = [[TEST_STREAM_1, TEST_STREAM_2]]
             .iter()
             .map(|stream_vec| {
                 stream_vec

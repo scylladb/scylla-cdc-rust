@@ -184,7 +184,7 @@ impl CDCRow<'_> {
             if i == schema.stream_id {
                 stream_id_vec = column.unwrap().into_blob().unwrap();
             } else if i == schema.time {
-                time = column.unwrap().as_uuid().unwrap();
+                time = column.unwrap().as_timeuuid().unwrap().into();
             } else if i == schema.batch_seq_no {
                 batch_seq_no = column.unwrap().as_int().unwrap();
             } else if i == schema.end_of_batch {

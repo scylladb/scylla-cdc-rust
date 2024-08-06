@@ -1,6 +1,6 @@
 use anyhow;
 use async_trait::async_trait;
-use chrono::NaiveDateTime;
+use chrono::DateTime;
 
 use scylla_cdc::consumer::{CDCRow, Consumer, ConsumerFactory};
 
@@ -12,7 +12,7 @@ struct PrinterConsumer;
 impl Consumer for PrinterConsumer {
     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
         let mut row_to_print = String::new();
-        // Print header with cdc-specific columns independent from the schema of base table
+        // Print header with cdc-specific columns independent of the schema of base table
         // (cdc$stream_id, cdc$time, etc.)
         row_to_print.push_str(&print_row_change_header(&data));
 
@@ -73,7 +73,7 @@ fn print_row_change_header(data: &CDCRow<'_>) -> String {
     let mut header_to_print = String::new();
     let stream_id = data.stream_id.to_string();
     let (secs, nanos) = data.time.get_timestamp().unwrap().to_unix();
-    let timestamp = NaiveDateTime::from_timestamp_opt(secs as i64, nanos)
+    let timestamp = DateTime::from_timestamp(secs as i64, nanos)
         .unwrap()
         .to_string();
     let operation = data.operation.to_string();
@@ -114,9 +114,10 @@ mod tests {
     use std::sync::Arc;
     use std::time;
 
-    use super::*;
     use scylla_cdc::log_reader::CDCLogReaderBuilder;
     use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+
+    use super::*;
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
