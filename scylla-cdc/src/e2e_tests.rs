@@ -208,7 +208,7 @@ mod tests {
         fn push_back(&mut self, pk: Vec<PrimaryKeyValue>, operation: Operation) {
             self.performed_operations
                 .entry(pk)
-                .or_insert_with(VecDeque::new)
+                .or_default()
                 .push_back(operation);
         }
 
@@ -375,7 +375,7 @@ mod tests {
         let mut test = Test::new("int_string_test", vec!["int", "text"])
             .await
             .unwrap();
-        let strings = vec!["blep".to_string(), "nghu".to_string(), "pkeee".to_string()];
+        let strings = ["blep".to_string(), "nghu".to_string(), "pkeee".to_string()];
         let start = now();
 
         for i in 0..100 {

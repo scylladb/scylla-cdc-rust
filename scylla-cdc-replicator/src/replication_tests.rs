@@ -76,8 +76,8 @@ mod tests {
 
         for mut log in result.rows.unwrap_or_default() {
             // handling udt specific, replacing src keyspace with dst keyspace
-            for col_opt in log.columns.iter_mut() {
-                if let Some(UserDefinedType { keyspace, .. }) = col_opt {
+            for col_opt in log.columns.iter_mut().flatten() {
+                if let UserDefinedType { keyspace, .. } = col_opt {
                     *keyspace = ks_dst.to_string();
                 }
             }

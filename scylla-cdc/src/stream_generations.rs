@@ -396,7 +396,7 @@ mod tests {
         let fetcher = setup().await.unwrap();
 
         // Input.
-        let timestamp_ms_vec = vec![
+        let timestamps_ms = [
             GENERATION_OLD_MILLISECONDS - 1,
             GENERATION_OLD_MILLISECONDS,
             (GENERATION_NEW_MILLISECONDS + GENERATION_OLD_MILLISECONDS) / 2,
@@ -404,7 +404,7 @@ mod tests {
             GENERATION_NEW_MILLISECONDS + 1,
         ];
         // Expected output.
-        let correct_generation_vec = vec![
+        let correct_generations = [
             None,
             Some(GENERATION_OLD_MILLISECONDS),
             Some(GENERATION_OLD_MILLISECONDS),
@@ -413,13 +413,13 @@ mod tests {
         ];
 
         assert_eq!(
-            timestamp_ms_vec.len(),
-            correct_generation_vec.len(),
+            timestamps_ms.len(),
+            correct_generations.len(),
             "These two vectors should have the same length."
         );
 
-        for i in 0..timestamp_ms_vec.len() {
-            let timestamp = chrono::Duration::milliseconds(timestamp_ms_vec[i]);
+        for i in 0..timestamps_ms.len() {
+            let timestamp = chrono::Duration::milliseconds(timestamps_ms[i]);
 
             let gen = fetcher
                 .fetch_generation_by_timestamp(&timestamp)
@@ -428,7 +428,7 @@ mod tests {
 
             assert_eq!(
                 gen,
-                correct_generation_vec[i].map(|gen_ms| GenerationTimestamp {
+                correct_generations[i].map(|gen_ms| GenerationTimestamp {
                     timestamp: chrono::Duration::milliseconds(gen_ms)
                 }),
             );
@@ -480,7 +480,7 @@ mod tests {
 
         let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
 
-        let correct_stream_ids: Vec<Vec<StreamID>> = vec![[TEST_STREAM_1, TEST_STREAM_2]]
+        let correct_stream_ids: Vec<Vec<StreamID>> = [[TEST_STREAM_1, TEST_STREAM_2]]
             .iter()
             .map(|stream_vec| {
                 stream_vec
