@@ -34,13 +34,13 @@ pub async fn create_test_db(
     ));
     create_keyspace_query.set_consistency(Consistency::All);
 
-    session.query(create_keyspace_query, &[]).await?;
+    session.query_unpaged(create_keyspace_query, &[]).await?;
     session.await_schema_agreement().await?;
     session.use_keyspace(&ks, false).await?;
 
     // Create test tables
     for query in schema {
-        session.query(query.clone(), &[]).await?;
+        session.query_unpaged(query.clone(), &[]).await?;
     }
     session.await_schema_agreement().await?;
     Ok(ks)
@@ -49,7 +49,7 @@ pub async fn create_test_db(
 pub async fn populate_simple_db_with_pk(session: &Arc<Session>, pk: u32) -> anyhow::Result<()> {
     for i in 0..3 {
         session
-            .query(
+            .query_unpaged(
                 format!(
                     "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, 'val{}', 'static{}');",
                     TEST_TABLE, pk, i, i, i

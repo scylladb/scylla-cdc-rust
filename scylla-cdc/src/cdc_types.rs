@@ -1,10 +1,10 @@
 //! A module containing types related to CDC internal structure.
-use scylla::cql_to_rust::{FromCqlVal, FromCqlValError};
-use scylla::frame::response::result::{ColumnType, CqlValue};
+use scylla::deserialize::DeserializeValue;
+use scylla::frame::response::result::ColumnType;
 use scylla::frame::value::CqlTimestamp;
-use scylla::serialize::value::SerializeCql;
-use scylla::serialize::writers::WrittenCellProof;
-use scylla::serialize::{CellWriter, SerializationError};
+use scylla::serialize::value::SerializeValue;
+use scylla::serialize::writers::{CellWriter, WrittenCellProof};
+use scylla::serialize::SerializationError;
 use std::fmt;
 
 /// A struct representing a timestamp of a stream generation.
@@ -19,7 +19,7 @@ impl fmt::Display for GenerationTimestamp {
     }
 }
 
-impl SerializeCql for GenerationTimestamp {
+impl SerializeValue for GenerationTimestamp {
     fn serialize<'b>(
         &self,
         typ: &ColumnType,
@@ -29,15 +29,20 @@ impl SerializeCql for GenerationTimestamp {
     }
 }
 
-impl FromCqlVal<CqlValue> for GenerationTimestamp {
-    fn from_cql(cql_val: CqlValue) -> Result<Self, FromCqlValError> {
-        match cql_val {
-            CqlValue::Timestamp(val) => {
-                let timestamp = chrono::Duration::milliseconds(val.0);
-                Ok(GenerationTimestamp { timestamp })
-            }
-            _ => Err(FromCqlValError::BadCqlType),
-        }
+impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for GenerationTimestamp {
+    fn type_check(typ: &ColumnType) -> Result<(), scylla::deserialize::TypeCheckError> {
+        <CqlTimestamp as DeserializeValue<'frame, 'metadata>>::type_check(typ)
+    }
+
+    fn deserialize(
+        typ: &'metadata ColumnType<'metadata>,
+        v: Option<scylla::deserialize::FrameSlice<'frame>>,
+    ) -> Result<Self, scylla::deserialize::DeserializationError> {
+        let timestamp = <CqlTimestamp as DeserializeValue<'frame, 'metadata>>::deserialize(typ, v)?;
+
+        Ok(GenerationTimestamp {
+            timestamp: chrono::Duration::milliseconds(timestamp.0),
+        })
     }
 }
 
@@ -54,7 +59,7 @@ impl fmt::Display for StreamID {
     }
 }
 
-impl SerializeCql for StreamID {
+impl SerializeValue for StreamID {
     fn serialize<'b>(
         &self,
         typ: &ColumnType,
@@ -64,12 +69,16 @@ impl SerializeCql for StreamID {
     }
 }
 
-impl FromCqlVal<CqlValue> for StreamID {
-    fn from_cql(cql_val: CqlValue) -> Result<Self, FromCqlValError> {
-        let id = cql_val
-            .as_blob()
-            .ok_or(FromCqlValError::BadCqlType)?
-            .to_owned();
+impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for StreamID {
+    fn type_check(typ: &ColumnType) -> Result<(), scylla::deserialize::TypeCheckError> {
+        <Vec<u8> as DeserializeValue<'frame, 'metadata>>::type_check(typ)
+    }
+
+    fn deserialize(
+        typ: &'metadata ColumnType<'metadata>,
+        v: Option<scylla::deserialize::FrameSlice<'frame>>,
+    ) -> Result<Self, scylla::deserialize::DeserializationError> {
+        let id = <Vec<u8> as DeserializeValue<'frame, 'metadata>>::deserialize(typ, v)?;
         Ok(StreamID { id })
     }
 }

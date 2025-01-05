@@ -311,7 +311,7 @@ async fn run_prepared_statement(
     timestamp: i64,
 ) -> anyhow::Result<()> {
     query.set_timestamp(Some(timestamp));
-    session.execute(&query, values).await?;
+    session.execute_unpaged(&query, values).await?;
 
     Ok(())
 }
@@ -323,7 +323,7 @@ async fn run_statement(
     timestamp: i64,
 ) -> anyhow::Result<()> {
     query.set_timestamp(Some(timestamp));
-    session.query(query, values).await?;
+    session.query_unpaged(query, values).await?;
 
     Ok(())
 }

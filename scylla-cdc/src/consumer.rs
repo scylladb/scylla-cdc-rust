@@ -3,7 +3,8 @@ use crate::cdc_types::StreamID;
 use async_trait::async_trait;
 use num_enum::TryFromPrimitive;
 use scylla::frame::response::result::CqlValue::Set;
-use scylla::frame::response::result::{ColumnSpec, CqlValue, Row};
+use scylla::frame::response::result::{CqlValue, Row};
+use scylla::transport::query_result::ColumnSpecs;
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Formatter;
@@ -97,7 +98,7 @@ pub struct CDCRowSchema {
 }
 
 impl CDCRowSchema {
-    pub fn new(specs: &[ColumnSpec]) -> CDCRowSchema {
+    pub fn new(specs: ColumnSpecs) -> CDCRowSchema {
         let mut stream_id = 0;
         let mut time = 0;
         let mut batch_seq_no = 0;
@@ -112,7 +113,7 @@ impl CDCRowSchema {
 
         // Hashmaps will have indices of data in a new vector without the hardcoded values.
         for (i, spec) in specs.iter().enumerate() {
-            match spec.name.as_str() {
+            match spec.name() {
                 STREAM_ID_NAME => stream_id = i,
                 TIME_NAME => time = i,
                 BATCH_SEQ_NO_NAME => batch_seq_no = i,
@@ -330,7 +331,7 @@ mod tests {
     async fn populate_single_value_table(session: &Session) {
         // We want to use ttl, because we check its value in some tests.
         session
-            .query(
+            .query_unpaged(
                 format!(
                     "INSERT INTO {} (pk, ck, v) VALUES ({}, {}, {}) USING TTL {};",
                     TEST_SINGLE_VALUE_TABLE, 1, 2, 3, 86400
@@ -355,7 +356,7 @@ mod tests {
 
     async fn populate_single_collection_table(session: &Session) {
         session
-            .query(
+            .query_unpaged(
                 format!(
                     "INSERT INTO {} (pk, ck, vs) VALUES (?, ?, ?);",
                     TEST_SINGLE_COLLECTION_TABLE
@@ -387,15 +388,17 @@ mod tests {
     async fn test_query() {
         let session = setup().await.unwrap();
         let result = session
-            .query(
+            .query_unpaged(
                 format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
                 (),
             )
             .await
+            .unwrap()
+            .into_rows_result()
             .unwrap();
 
-        let row = result.rows.unwrap().remove(0);
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let row = result.rows::<Row>().unwrap().next().unwrap().unwrap();
+        let schema = CDCRowSchema::new(result.column_specs());
         let cdc_row = CDCRow::from_row(row, &schema);
 
         // Test against the default values in CDCRow::from_row
@@ -418,7 +421,7 @@ mod tests {
     async fn test_get_deleted() {
         let session = setup().await.unwrap();
         session
-            .query(
+            .query_unpaged(
                 format!(
                     "DELETE v FROM {} WHERE pk = {} AND ck = {};",
                     TEST_SINGLE_VALUE_TABLE, 1, 2
@@ -429,12 +432,14 @@ mod tests {
             .unwrap();
         // We must allow filtering in order to search by cdc$operation.
         let result = session
-            .query(format!("SELECT * FROM {} WHERE \"cdc$operation\" = {} AND pk = {} AND ck = {} ALLOW FILTERING;",
+            .query_unpaged(format!("SELECT * FROM {} WHERE \"cdc$operation\" = {} AND pk = {} AND ck = {} ALLOW FILTERING;",
                            TEST_SINGLE_VALUE_CDC_TABLE, OperationType::RowUpdate as i8, 1, 2), ())
             .await
+            .unwrap()
+            .into_rows_result()
             .unwrap();
-        let row = result.rows.unwrap().remove(0);
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let row = result.rows::<Row>().unwrap().next().unwrap().unwrap();
+        let schema = CDCRowSchema::new(result.column_specs());
         let cdc_row = CDCRow::from_row(row, &schema);
 
         assert!(cdc_row.is_value_deleted("v"))
@@ -444,7 +449,7 @@ mod tests {
     async fn test_get_deleted_elements() {
         let session = setup().await.unwrap();
         session
-            .query(
+            .query_unpaged(
                 format!(
                     "UPDATE {} SET vs = vs - {{{}}} WHERE pk = {} AND ck = {}",
                     TEST_SINGLE_COLLECTION_TABLE, 2, 1, 2
@@ -455,13 +460,15 @@ mod tests {
             .unwrap();
         // We must allow filtering in order to search by cdc$operation.
         let result = session
-            .query(format!("SELECT * FROM {} WHERE \"cdc$operation\" = {} AND pk = {} AND ck = {} ALLOW FILTERING;",
+            .query_unpaged(format!("SELECT * FROM {} WHERE \"cdc$operation\" = {} AND pk = {} AND ck = {} ALLOW FILTERING;",
                            TEST_SINGLE_COLLECTION_CDC_TABLE, OperationType::RowUpdate as i8, 1, 2), ())
             .await
+            .unwrap()
+            .into_rows_result()
             .unwrap();
 
-        let row = result.rows.unwrap().remove(0);
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let row = result.rows::<Row>().unwrap().next().unwrap().unwrap();
+        let schema = CDCRowSchema::new(result.column_specs());
         let cdc_row = CDCRow::from_row(row, &schema);
 
         let vec = cdc_row.get_deleted_elements("vs");
@@ -476,7 +483,7 @@ mod tests {
         let session = setup().await.unwrap();
         // Set the columns order to test if schema maps that correctly.
         let result = session
-            .query(
+            .query_unpaged(
                 format!(
                     "SELECT ck, pk, v, \"cdc$deleted_v\",\
                                   \"cdc$time\", \"cdc$stream_id\", \"cdc$batch_seq_no\", \
@@ -487,9 +494,11 @@ mod tests {
                 (),
             )
             .await
+            .unwrap()
+            .into_rows_result()
             .unwrap();
 
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let schema = CDCRowSchema::new(result.column_specs());
         // Check fixed values.
         assert_eq!(schema.stream_id, 5);
         assert_eq!(schema.time, 4);
@@ -516,15 +525,17 @@ mod tests {
     async fn test_take_value() {
         let session = setup().await.unwrap();
         let result = session
-            .query(
+            .query_unpaged(
                 format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
                 (),
             )
             .await
+            .unwrap()
+            .into_rows_result()
             .unwrap();
 
-        let row = result.rows.unwrap().remove(0);
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let row = result.rows::<Row>().unwrap().next().unwrap().unwrap();
+        let schema = CDCRowSchema::new(result.column_specs());
         let mut cdc_row = CDCRow::from_row(row, &schema);
 
         assert_eq!(cdc_row.take_value("v").unwrap().as_int().unwrap(), 3);
@@ -535,7 +546,7 @@ mod tests {
     async fn test_take_deleted_elements() {
         let session = setup().await.unwrap();
         session
-            .query(
+            .query_unpaged(
                 format!(
                     "UPDATE {} SET vs = vs - ? WHERE pk = ? AND ck = ?",
                     TEST_SINGLE_COLLECTION_TABLE
@@ -546,13 +557,15 @@ mod tests {
             .unwrap();
         // We must allow filtering in order to search by cdc$operation.
         let result = session
-            .query(format!("SELECT * FROM {} WHERE \"cdc$operation\" = ? AND pk = ? AND ck = ? ALLOW FILTERING;",
+            .query_unpaged(format!("SELECT * FROM {} WHERE \"cdc$operation\" = ? AND pk = ? AND ck = ? ALLOW FILTERING;",
                            TEST_SINGLE_COLLECTION_CDC_TABLE), (OperationType::RowUpdate as i8, 1, 2))
             .await
+            .unwrap()
+            .into_rows_result()
             .unwrap();
 
-        let row = result.rows.unwrap().remove(0);
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let row = result.rows::<Row>().unwrap().next().unwrap().unwrap();
+        let schema = CDCRowSchema::new(result.column_specs());
         let mut cdc_row = CDCRow::from_row(row, &schema);
 
         let vec = cdc_row.take_deleted_elements("vs");
