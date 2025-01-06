@@ -181,7 +181,7 @@ mod tests {
             for (i, (original, replicated)) in
                 original_rows.iter().zip(replicated_rows.iter()).enumerate()
             {
-                if !equal_rows(&original, &replicated) {
+                if !equal_rows(original, replicated) {
                     fail_test(
                         name,
                         &original_rows,
