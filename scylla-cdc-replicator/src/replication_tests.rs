@@ -76,7 +76,7 @@ mod tests {
         let schema = CDCRowSchema::new(result.column_specs());
 
         while let Some(log_res) = result.next().await {
-            let mut log = log_res.unwrap();
+            let mut log = log_res?;
             // handling udt specific, replacing src keyspace with dst keyspace
             for col_opt in log.columns.iter_mut().flatten() {
                 if let UserDefinedType { keyspace, .. } = col_opt {
