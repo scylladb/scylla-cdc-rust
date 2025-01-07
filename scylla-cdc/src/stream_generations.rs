@@ -234,14 +234,14 @@ async fn get_cluster_size(session: &Session) -> anyhow::Result<usize> {
     // We are using default consistency here since the system keyspace is special and
     // the coordinator which handles the query will only read local data
     // and will not contact other nodes, so the query will work with any cluster size larger than 0.
-    let (rows,) = session
+    let (peers_num,) = session
         .query_unpaged("SELECT COUNT(*) FROM system.peers", &[])
         .await?
         .into_rows_result()?
         .first_row::<(i64,)>()?;
 
     // Query returns a number of peers in a cluster, so we need to add 1 to count current node.
-    Ok(rows as usize + 1)
+    Ok(peers_num as usize + 1)
 }
 
 // Choose appropriate consistency level depending on the cluster size.
