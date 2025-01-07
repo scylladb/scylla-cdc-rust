@@ -46,7 +46,7 @@ trait StreamSession: Sync + Send {
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
         paging_state: PagingState,
-    ) -> Result<(QueryResult, Option<PagingState>), QueryError>;
+    ) -> Result<(QueryResult, PagingStateResponse), QueryError>;
 }
 
 #[async_trait]
@@ -62,16 +62,12 @@ impl StreamSession for Session {
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
         paging_state: PagingState,
-    ) -> Result<(QueryResult, Option<PagingState>), QueryError> {
+    ) -> Result<(QueryResult, PagingStateResponse), QueryError> {
         let (query_result, paging_state_response) = self
             .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
             .await?;
-        let next_paging_state = match paging_state_response {
-            PagingStateResponse::HasMorePages { state } => Some(state),
-            PagingStateResponse::NoMorePages => None,
-        };
 
-        Ok((query_result, next_paging_state))
+        Ok((query_result, paging_state_response))
     }
 }
 
@@ -223,7 +219,7 @@ impl StreamReader {
                 )
                 .await;
             match query_res {
-                Ok((query_result, next_paging_state)) => {
+                Ok((query_result, paging_state_response)) => {
                     sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
                     page_no += 1;
                     let query_rows_result = query_result.into_rows_result()?;
@@ -234,9 +230,9 @@ impl StreamReader {
                             .consume_cdc(CDCRow::from_row(row?, &schema))
                             .await?;
                     }
-                    match next_paging_state {
-                        Some(state) => next_state = state,
-                        None => break,
+                    match paging_state_response {
+                        PagingStateResponse::HasMorePages { state } => next_state = state,
+                        PagingStateResponse::NoMorePages => break,
                     }
                 }
                 Err(
@@ -418,7 +414,7 @@ mod tests {
             window_begin: &value::CqlTimestamp,
             window_end: &value::CqlTimestamp,
             paging_state: PagingState,
-        ) -> Result<(QueryResult, Option<PagingState>), QueryError> {
+        ) -> Result<(QueryResult, PagingStateResponse), QueryError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {
                 let read_timeout = DbError::ReadTimeout {
                     consistency: Default::default(),
@@ -432,11 +428,7 @@ mod tests {
                     .session
                     .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
                     .await?;
-                let next_paging_state = match paging_state_response {
-                    PagingStateResponse::HasMorePages { state } => Some(state),
-                    PagingStateResponse::NoMorePages => None,
-                };
-                Ok((query_result, next_paging_state))
+                Ok((query_result, paging_state_response))
             }
         }
     }
