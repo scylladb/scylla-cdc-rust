@@ -230,6 +230,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 mod tests {
     use crate::cdc_types::{GenerationTimestamp, StreamID};
     use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, TableBackedCheckpointSaver};
+    use futures::{StreamExt, TryStreamExt};
     use rand::prelude::*;
     use scylla::frame::value;
     use scylla::Session;
@@ -254,22 +255,21 @@ mod tests {
 
     async fn get_checkpoints(session: &Arc<Session>, table: &str) -> Vec<Checkpoint> {
         session
-            .query_unpaged(format!("SELECT * FROM {}", table), ())
+            .query_iter(format!("SELECT * FROM {}", table), ())
             .await
             .unwrap()
-            .into_rows_result()
+            .rows_stream::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()
             .unwrap()
-            .rows::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()
-            .unwrap()
-            .map(|x| x.unwrap())
-            .map(|(id, gen, time)| -> Checkpoint {
-                Checkpoint {
+            .map(|res| {
+                res.map(|(id, gen, time)| Checkpoint {
                     stream_id: id,
                     generation: gen,
                     timestamp: Duration::from_millis(time.0 as u64),
-                }
+                })
             })
-            .collect::<Vec<Checkpoint>>()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

@@ -304,6 +304,7 @@ impl CDCRow<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use scylla::Session;
     use scylla_cdc_test_utils::prepare_db;
     use std::sync::Arc;
@@ -387,17 +388,17 @@ mod tests {
     #[tokio::test]
     async fn test_query() {
         let session = setup().await.unwrap();
-        let result = session
-            .query_unpaged(
+        let mut result = session
+            .query_iter(
                 format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
                 (),
             )
             .await
             .unwrap()
-            .into_rows_result()
+            .rows_stream::<Row>()
             .unwrap();
 
-        let row = result.rows::<Row>().unwrap().next().unwrap().unwrap();
+        let row = result.next().await.unwrap().unwrap();
         let schema = CDCRowSchema::new(result.column_specs());
         let cdc_row = CDCRow::from_row(row, &schema);
 
