@@ -13,9 +13,9 @@ mod tests {
     use itertools::{repeat_n, Itertools};
     use scylla::frame::response::result::{ColumnType, CqlValue};
     use scylla::prepared_statement::PreparedStatement;
-    use scylla::serialize::value::SerializeCql;
-    use scylla::serialize::writers::WrittenCellProof;
-    use scylla::serialize::{CellWriter, SerializationError};
+    use scylla::serialize::value::SerializeValue;
+    use scylla::serialize::writers::{CellWriter, WrittenCellProof};
+    use scylla::serialize::SerializationError;
     use scylla::Session;
     use scylla_cdc_test_utils::{now, prepare_db};
     use tokio::sync::Mutex;
@@ -40,7 +40,7 @@ mod tests {
         List(Vec<PrimaryKeyValue>),
     }
 
-    impl SerializeCql for PrimaryKeyValue {
+    impl SerializeValue for PrimaryKeyValue {
         fn serialize<'b>(
             &self,
             typ: &ColumnType,
@@ -231,7 +231,7 @@ mod tests {
             v: Option<i32>,
         ) -> Result<()> {
             self.session
-                .execute(&self.insert_query, Test::get_value_list(&pk_vec, ck, v))
+                .execute_unpaged(&self.insert_query, Test::get_value_list(&pk_vec, ck, v))
                 .await?;
             let operation = Operation::new(OperationType::RowInsert, Some(ck), v);
             self.push_back(pk_vec, operation);
@@ -246,7 +246,7 @@ mod tests {
             v: Option<i32>,
         ) -> Result<()> {
             self.session
-                .execute(&self.update_query, Test::get_value_list(&pk_vec, ck, v))
+                .execute_unpaged(&self.update_query, Test::get_value_list(&pk_vec, ck, v))
                 .await?;
             let operation = Operation::new(OperationType::RowUpdate, Some(ck), v);
             self.push_back(pk_vec, operation);

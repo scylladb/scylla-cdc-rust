@@ -2,7 +2,7 @@
 mod tests {
     use crate::replicator_consumer::ReplicatorConsumer;
     use anyhow::anyhow;
-    use futures_util::FutureExt;
+    use futures_util::{FutureExt, StreamExt, TryStreamExt};
     use itertools::Itertools;
     use scylla::frame::response::result::CqlValue::{Boolean, Int, Text, UserDefinedType};
     use scylla::frame::response::result::{CqlValue, Row};
@@ -47,12 +47,13 @@ mod tests {
         name: &str,
         last_read: &mut (i64, i32),
     ) -> anyhow::Result<()> {
-        let result = session
-            .query(
+        let mut result = session
+            .query_iter(
                 format!("SELECT * FROM {}.{}_scylla_cdc_log", ks_src, name),
                 (),
             )
-            .await?;
+            .await?
+            .rows_stream::<Row>()?;
 
         let table_schema = session
             .get_cluster_data()
@@ -72,9 +73,10 @@ mod tests {
         )
         .await;
 
-        let schema = CDCRowSchema::new(&result.col_specs);
+        let schema = CDCRowSchema::new(result.column_specs());
 
-        for mut log in result.rows.unwrap_or_default() {
+        while let Some(log_res) = result.next().await {
+            let mut log = log_res?;
             // handling udt specific, replacing src keyspace with dst keyspace
             for col_opt in log.columns.iter_mut().flatten() {
                 if let UserDefinedType { keyspace, .. } = col_opt {
@@ -163,15 +165,17 @@ mod tests {
         name: &str,
     ) -> anyhow::Result<()> {
         let original_rows = session
-            .query(format!("SELECT * FROM {}.{}", ks_src, name), ())
+            .query_iter(format!("SELECT * FROM {}.{}", ks_src, name), ())
             .await?
-            .rows
-            .unwrap_or_default();
+            .rows_stream::<Row>()?
+            .try_collect::<Vec<_>>()
+            .await?;
         let replicated_rows = session
-            .query(format!("SELECT * FROM {}.{}", ks_dst, name), ())
+            .query_iter(format!("SELECT * FROM {}.{}", ks_dst, name), ())
             .await?
-            .rows
-            .unwrap_or_default();
+            .rows_stream::<Row>()?
+            .try_collect::<Vec<_>>()
+            .await?;
 
         if original_rows.len() == replicated_rows.len() {
             for (i, (original, replicated)) in
@@ -207,7 +211,7 @@ mod tests {
         column_name: &str,
     ) -> anyhow::Result<(Vec<Row>, Vec<Row>)> {
         let original_rows = session
-            .query(
+            .query_iter(
                 format!(
                     "SELECT WRITETIME ({}) FROM {}.{}",
                     column_name, ks_src, table_name
@@ -215,10 +219,11 @@ mod tests {
                 (),
             )
             .await?
-            .rows
-            .unwrap_or_default();
+            .rows_stream::<Row>()?
+            .try_collect::<Vec<_>>()
+            .await?;
         let replicated_rows = session
-            .query(
+            .query_iter(
                 format!(
                     "SELECT WRITETIME ({}) FROM {}.{}",
                     column_name, ks_dst, table_name
@@ -226,8 +231,9 @@ mod tests {
                 (),
             )
             .await?
-            .rows
-            .unwrap_or_default();
+            .rows_stream::<Row>()?
+            .try_collect::<Vec<_>>()
+            .await?;
 
         Ok((original_rows, replicated_rows))
     }
@@ -327,7 +333,7 @@ mod tests {
         let mut last_read = (0, 0);
 
         for operation in operations {
-            session.query(operation, []).await?;
+            session.query_unpaged(operation, []).await?;
             replicate(
                 &session,
                 &ks_src,
@@ -800,7 +806,7 @@ mod tests {
 
         // We update timestamps for v2 column in src.
         session
-            .query(
+            .query_unpaged(
                 "UPDATE COMPARE_TIME SET v2 = false WHERE pk = 1 AND ck = 2",
                 [],
             )

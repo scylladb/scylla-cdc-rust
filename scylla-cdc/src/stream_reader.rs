@@ -6,10 +6,12 @@ use std::time;
 
 use async_trait::async_trait;
 use itertools::Itertools;
+use scylla::frame::response::result::Row;
 use scylla::frame::value;
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::errors::{DbError, QueryError};
-use scylla::{Bytes, QueryResult, Session};
+use scylla::transport::{PagingState, PagingStateResponse};
+use scylla::{QueryResult, Session};
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{enabled, warn};
@@ -43,8 +45,8 @@ trait StreamSession: Sync + Send {
         ids: &[StreamID],
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
-        paging_state: Option<Bytes>,
-    ) -> Result<QueryResult, QueryError>;
+        paging_state: PagingState,
+    ) -> Result<(QueryResult, PagingStateResponse), QueryError>;
 }
 
 #[async_trait]
@@ -59,10 +61,13 @@ impl StreamSession for Session {
         ids: &[StreamID],
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
-        paging_state: Option<Bytes>,
-    ) -> Result<QueryResult, QueryError> {
-        self.execute_paged(statement, (ids, window_begin, window_end), paging_state)
-            .await
+        paging_state: PagingState,
+    ) -> Result<(QueryResult, PagingStateResponse), QueryError> {
+        let (query_result, paging_state_response) = self
+            .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
+            .await?;
+
+        Ok((query_result, paging_state_response))
     }
 }
 
@@ -122,7 +127,7 @@ impl StreamReader {
         let (sender, receiver) = watch::channel(checkpoint.clone());
 
         if self.config.should_load_progress {
-            let mut loaded_timestamp = chrono::Duration::max_value();
+            let mut loaded_timestamp = chrono::Duration::MAX;
             for stream in &self.stream_id_vec {
                 if let Some(timestamp) = self
                     .config
@@ -135,7 +140,7 @@ impl StreamReader {
                     loaded_timestamp = min(timestamp, loaded_timestamp);
                 }
             }
-            if loaded_timestamp != chrono::Duration::max_value() {
+            if loaded_timestamp != chrono::Duration::MAX {
                 window_begin = max(window_begin, loaded_timestamp);
             }
         }
@@ -199,7 +204,7 @@ impl StreamReader {
     ) -> anyhow::Result<()> {
         let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
 
-        let mut next_state = None;
+        let mut next_state = PagingState::start();
         let mut page_no = 0;
         loop {
             let state_clone = next_state.clone();
@@ -214,19 +219,20 @@ impl StreamReader {
                 )
                 .await;
             match query_res {
-                Ok(x) => {
+                Ok((query_result, paging_state_response)) => {
                     sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
                     page_no += 1;
-                    if let Some(rows) = x.rows {
-                        let schema = CDCRowSchema::new(&x.col_specs);
-
-                        for row in rows {
-                            consumer.consume_cdc(CDCRow::from_row(row, &schema)).await?;
-                        }
+                    let query_rows_result = query_result.into_rows_result()?;
+                    let schema = CDCRowSchema::new(query_rows_result.column_specs());
+                    let rows = query_rows_result.rows::<Row>()?;
+                    for row in rows {
+                        consumer
+                            .consume_cdc(CDCRow::from_row(row?, &schema))
+                            .await?;
                     }
-                    match x.paging_state {
-                        Some(state) => next_state = Some(state),
-                        None => break,
+                    match paging_state_response {
+                        PagingStateResponse::HasMorePages { state } => next_state = state,
+                        PagingStateResponse::NoMorePages => break,
                     }
                 }
                 Err(
@@ -359,7 +365,7 @@ mod tests {
         let mut rows = session
             .query_iter(query_stream_id, ())
             .await?
-            .into_typed::<(StreamID,)>();
+            .rows_stream::<(StreamID,)>()?;
 
         let mut stream_ids_vec = Vec::new();
         while let Some(row) = rows.next().await {
@@ -407,8 +413,8 @@ mod tests {
             ids: &[StreamID],
             window_begin: &value::CqlTimestamp,
             window_end: &value::CqlTimestamp,
-            paging_state: Option<Bytes>,
-        ) -> Result<QueryResult, QueryError> {
+            paging_state: PagingState,
+        ) -> Result<(QueryResult, PagingStateResponse), QueryError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {
                 let read_timeout = DbError::ReadTimeout {
                     consistency: Default::default(),
@@ -418,9 +424,11 @@ mod tests {
                 };
                 Err(QueryError::DbError(read_timeout, String::new()))
             } else {
-                self.session
-                    .execute_paged(statement, (ids, window_begin, window_end), paging_state)
-                    .await
+                let (query_result, paging_state_response) = self
+                    .session
+                    .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
+                    .await?;
+                Ok((query_result, paging_state_response))
             }
         }
     }
@@ -525,7 +533,7 @@ mod tests {
         let second_ago_timestamp = chrono::Duration::milliseconds(second_ago.timestamp_millis());
         insert_before_upper_timestamp_query.set_timestamp(second_ago_timestamp.num_microseconds());
         shared_session
-            .query(insert_before_upper_timestamp_query, ())
+            .query_unpaged(insert_before_upper_timestamp_query, ())
             .await
             .unwrap();
 
@@ -541,7 +549,7 @@ mod tests {
             chrono::Duration::milliseconds(second_later.timestamp_millis());
         insert_after_upper_timestamp_query.set_timestamp(second_later_timestamp.num_microseconds());
         shared_session
-            .query(insert_after_upper_timestamp_query, ())
+            .query_unpaged(insert_after_upper_timestamp_query, ())
             .await
             .unwrap();
         let fetched_rows = Arc::new(Mutex::new(vec![]));

@@ -56,7 +56,7 @@ impl CDCLogReader {
 
     // Tell the worker to stop immediately
     pub fn stop(&mut self) {
-        self.stop_at(chrono::Duration::min_value());
+        self.stop_at(chrono::Duration::MIN);
     }
 }
 
@@ -196,8 +196,7 @@ impl CDCReaderWorker {
     }
 
     async fn stop_now(&self) {
-        self.set_upper_timestamp(chrono::Duration::min_value())
-            .await;
+        self.set_upper_timestamp(chrono::Duration::MIN).await;
     }
 }
 
@@ -271,7 +270,7 @@ impl CDCLogReaderBuilder {
     /// * should_save_progress: false,
     /// * pause_between_saves: 10 seconds
     pub fn new() -> CDCLogReaderBuilder {
-        let end_timestamp = chrono::Duration::max_value();
+        let end_timestamp = chrono::Duration::MAX;
         let session = None;
         let keyspace = None;
         let table_name = None;
@@ -435,7 +434,7 @@ impl CDCLogReaderBuilder {
             anyhow::anyhow!("failed to create the cdc reader: missing consumer factory")
         })?;
 
-        let end_timestamp = chrono::Duration::max_value();
+        let end_timestamp = chrono::Duration::MAX;
         let (end_timestamp_sender, end_timestamp_receiver) =
             tokio::sync::watch::channel(end_timestamp);
         let readers = vec![];

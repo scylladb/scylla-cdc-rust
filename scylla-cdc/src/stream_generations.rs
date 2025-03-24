@@ -1,11 +1,10 @@
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
-use scylla::frame::response::result::Row;
 use scylla::frame::value;
 use scylla::query::Query;
 use scylla::statement::Consistency;
-use scylla::{IntoTypedRows, Session};
+use scylla::Session;
 use std::sync::Arc;
 use std::time;
 use tokio::sync::mpsc;
@@ -59,7 +58,7 @@ impl GenerationFetcher {
             .session
             .query_iter(query, &[])
             .await?
-            .into_typed::<(GenerationTimestamp,)>();
+            .rows_stream::<(GenerationTimestamp,)>()?;
 
         while let Some(generation) = rows.next().await {
             generations.push(generation?.0)
@@ -96,11 +95,13 @@ impl GenerationFetcher {
 
         let result = self
             .session
-            .query(query, (value::CqlTimestamp(time.num_milliseconds()),))
+            .query_unpaged(query, (value::CqlTimestamp(time.num_milliseconds()),))
             .await?
-            .rows;
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
+            .map(|(ts,)| ts);
 
-        GenerationFetcher::return_single_row(result)
+        Ok(result)
     }
 
     // Function instead of constant for testing purposes.
@@ -128,9 +129,15 @@ impl GenerationFetcher {
         let query =
             new_distributed_system_query(self.get_next_generation_query(), &self.session).await?;
 
-        let result = self.session.query(query, (generation,)).await?.rows;
+        let result = self
+            .session
+            .query_unpaged(query, (generation,))
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
+            .map(|(ts,)| ts);
 
-        GenerationFetcher::return_single_row(result)
+        Ok(result)
     }
 
     // Function instead of constant for testing purposes.
@@ -162,7 +169,7 @@ impl GenerationFetcher {
             .session
             .query_iter(query, (generation,))
             .await?
-            .into_typed::<(Vec<StreamID>,)>();
+            .rows_stream::<(Vec<StreamID>,)>()?;
 
         while let Some(next_row) = rows.next().await {
             let (ids,) = next_row?;
@@ -170,17 +177,6 @@ impl GenerationFetcher {
         }
 
         Ok(result_vec)
-    }
-
-    // Return single row containing generation.
-    fn return_single_row(row: Option<Vec<Row>>) -> anyhow::Result<Option<GenerationTimestamp>> {
-        if let Some(row) = row {
-            if let Some(generation) = row.into_typed::<(GenerationTimestamp,)>().next() {
-                return Ok(Some(generation?.0));
-            }
-        }
-
-        Ok(None)
     }
 
     pub async fn fetch_generations_continuously(
@@ -238,15 +234,14 @@ async fn get_cluster_size(session: &Session) -> anyhow::Result<usize> {
     // We are using default consistency here since the system keyspace is special and
     // the coordinator which handles the query will only read local data
     // and will not contact other nodes, so the query will work with any cluster size larger than 0.
-    let mut rows = session
-        .query("SELECT COUNT(*) FROM system.peers", &[])
+    let (peers_num,) = session
+        .query_unpaged("SELECT COUNT(*) FROM system.peers", &[])
         .await?
-        .rows
-        .unwrap()
-        .into_typed::<(i64,)>();
+        .into_rows_result()?
+        .first_row::<(i64,)>()?;
 
     // Query returns a number of peers in a cluster, so we need to add 1 to count current node.
-    Ok(rows.next().unwrap().unwrap().0 as usize + 1)
+    Ok(peers_num as usize + 1)
 }
 
 // Choose appropriate consistency level depending on the cluster size.
@@ -329,7 +324,7 @@ mod tests {
         .unwrap();
 
         session
-            .query(query, (value::CqlTimestamp(generation),))
+            .query_unpaged(query, (value::CqlTimestamp(generation),))
             .await
             .unwrap();
     }
@@ -352,7 +347,10 @@ mod tests {
         .await
         .unwrap();
 
-        session.query(query, (stream_generation,)).await.unwrap();
+        session
+            .query_unpaged(query, (stream_generation,))
+            .await
+            .unwrap();
     }
 
     // Create setup for tests.

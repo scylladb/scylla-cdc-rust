@@ -1,6 +1,6 @@
 [package]
 name = "scylla-cdc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Library for consuming ScyllaDB CDC log for Rust"
 repository = "https://github.com/scylladb/scylla-cdc-rust"
@@ -13,7 +13,7 @@ license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0.48"
-scylla = "0.13.1"
+scylla = "0.15.1"
 tokio = { version = "1.1.0", features = [
     "rt",
     "io-util",
@@ -22,7 +22,7 @@ tokio = { version = "1.1.0", features = [
     "macros",
     "sync",
 ] }
-chrono = "0.4.19"
+chrono = "0.4.39"
 futures = "0.3.17"
 uuid = { version = "1.0.0", features = ["v1"] }
 num_enum = "0.7.2"

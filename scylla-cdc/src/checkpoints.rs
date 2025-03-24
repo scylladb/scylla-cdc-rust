@@ -132,7 +132,7 @@ impl TableBackedCheckpointSaver {
     ) -> anyhow::Result<()> {
         let schema = get_checkpoint_table_schema(checkpoint_table);
 
-        session.query(schema, ()).await?;
+        session.query_unpaged(schema, ()).await?;
         session.await_schema_agreement().await?;
 
         Ok(())
@@ -160,7 +160,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
         let timestamp = value::CqlTimestamp(checkpoint.timestamp.as_millis() as i64);
 
         self.session
-            .execute(
+            .execute_unpaged(
                 &self.make_checkpoint_stmt,
                 (&checkpoint.generation, timestamp, &checkpoint.stream_id),
             )
@@ -174,7 +174,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
         let dummy_timestamp = value::CqlTimestamp(i64::MAX);
 
         self.session
-            .execute(
+            .execute_unpaged(
                 &self.make_checkpoint_stmt,
                 (generation, dummy_timestamp, marked_stream_id),
             )
@@ -187,7 +187,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
     async fn load_last_generation(&self) -> anyhow::Result<Option<GenerationTimestamp>> {
         let generation = self
             .session
-            .query(
+            .query_unpaged(
                 format!(
                     "SELECT generation FROM {}
                     WHERE stream_id = ?",
@@ -196,7 +196,8 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
                 (get_default_generation_pk(),),
             )
             .await?
-            .maybe_first_row_typed::<(GenerationTimestamp,)>()?
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
             .map(|row| row.0);
 
         Ok(generation)
@@ -209,7 +210,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
     ) -> anyhow::Result<Option<chrono::Duration>> {
         Ok(self
             .session
-            .query(
+            .query_unpaged(
                 format!(
                     "SELECT time FROM {}
                     WHERE stream_id = ?
@@ -219,7 +220,8 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
                 (stream_id,),
             )
             .await?
-            .maybe_first_row_typed::<(value::CqlTimestamp,)>()?
+            .into_rows_result()?
+            .maybe_first_row::<(value::CqlTimestamp,)>()?
             .map(|t| chrono::Duration::milliseconds(t.0 .0)))
     }
 }
@@ -228,9 +230,10 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 mod tests {
     use crate::cdc_types::{GenerationTimestamp, StreamID};
     use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, TableBackedCheckpointSaver};
+    use futures::{StreamExt, TryStreamExt};
     use rand::prelude::*;
     use scylla::frame::value;
-    use scylla::{IntoTypedRows, Session};
+    use scylla::Session;
     use scylla_cdc_test_utils::{prepare_db, unique_name};
     use std::ops::Add;
     use std::sync::Arc;
@@ -252,21 +255,21 @@ mod tests {
 
     async fn get_checkpoints(session: &Arc<Session>, table: &str) -> Vec<Checkpoint> {
         session
-            .query(format!("SELECT * FROM {}", table), ())
+            .query_iter(format!("SELECT * FROM {}", table), ())
             .await
             .unwrap()
-            .rows()
+            .rows_stream::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()
             .unwrap()
-            .into_typed::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()
-            .map(|x| x.unwrap())
-            .map(|(id, gen, time)| -> Checkpoint {
-                Checkpoint {
+            .map(|res| {
+                res.map(|(id, gen, time)| Checkpoint {
                     stream_id: id,
                     generation: gen,
                     timestamp: Duration::from_millis(time.0 as u64),
-                }
+                })
             })
-            .collect::<Vec<Checkpoint>>()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -280,7 +283,7 @@ mod tests {
                 id: vec![1, 1, 1, 1, 1, 1, 1, 1],
             },
             generation: GenerationTimestamp {
-                timestamp: chrono::Duration::min_value(),
+                timestamp: chrono::Duration::MIN,
             },
         };
 
@@ -352,7 +355,7 @@ mod tests {
                 timestamp: Duration::from_secs(random::<u64>() % (100u64 * N_OF_IDS as u64)),
                 stream_id: StreamID { id: vec![0, i] },
                 generation: GenerationTimestamp {
-                    timestamp: chrono::Duration::max_value(),
+                    timestamp: chrono::Duration::MAX,
                 },
             };
 
