@@ -3,7 +3,7 @@ use std::time;
 
 use futures_util::future::RemoteHandle;
 use futures_util::stream::FuturesUnordered;
-use scylla::SessionBuilder;
+use scylla::client::session_builder::SessionBuilder;
 use scylla_cdc::log_reader::{CDCLogReader, CDCLogReaderBuilder};
 
 use crate::replicator_consumer::ReplicatorConsumerFactory;

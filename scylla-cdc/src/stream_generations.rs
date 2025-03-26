@@ -1,10 +1,10 @@
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
-use scylla::frame::value;
-use scylla::query::Query;
+use scylla::client::session::Session;
+use scylla::statement::unprepared::Statement;
 use scylla::statement::Consistency;
-use scylla::Session;
+use scylla::value;
 use std::sync::Arc;
 use std::time;
 use tokio::sync::mpsc;
@@ -245,7 +245,7 @@ async fn get_cluster_size(session: &Session) -> anyhow::Result<usize> {
 }
 
 // Choose appropriate consistency level depending on the cluster size.
-async fn select_consistency(session: &Session, query: &mut Query) -> anyhow::Result<()> {
+async fn select_consistency(session: &Session, query: &mut Statement) -> anyhow::Result<()> {
     query.set_consistency(match get_cluster_size(session).await? {
         1 => Consistency::One,
         _ => Consistency::Quorum,
@@ -253,8 +253,11 @@ async fn select_consistency(session: &Session, query: &mut Query) -> anyhow::Res
     Ok(())
 }
 
-async fn new_distributed_system_query(stmt: String, session: &Session) -> anyhow::Result<Query> {
-    let mut query = Query::new(stmt);
+async fn new_distributed_system_query(
+    stmt: String,
+    session: &Session,
+) -> anyhow::Result<Statement> {
+    let mut query = Statement::new(stmt);
     select_consistency(session, &mut query).await?;
 
     Ok(query)

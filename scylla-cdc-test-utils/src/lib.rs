@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use scylla::query::Query;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::statement::unprepared::Statement;
 use scylla::statement::Consistency;
-use scylla::{Session, SessionBuilder};
 
 pub const TEST_TABLE: &str = "t";
 static UNIQUE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -29,7 +30,7 @@ pub async fn create_test_db(
     replication_factor: u8,
 ) -> anyhow::Result<String> {
     let ks = unique_name();
-    let mut create_keyspace_query = Query::new(format!(
+    let mut create_keyspace_query = Statement::new(format!(
         "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': {}}};", ks, replication_factor
     ));
     create_keyspace_query.set_consistency(Consistency::All);

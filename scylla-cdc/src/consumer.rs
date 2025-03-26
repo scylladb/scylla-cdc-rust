@@ -2,9 +2,9 @@
 use crate::cdc_types::StreamID;
 use async_trait::async_trait;
 use num_enum::TryFromPrimitive;
-use scylla::frame::response::result::CqlValue::Set;
-use scylla::frame::response::result::{CqlValue, Row};
-use scylla::transport::query_result::ColumnSpecs;
+use scylla::response::query_result::ColumnSpecs;
+use scylla::value::CqlValue::Set;
+use scylla::value::{CqlValue, Row};
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Formatter;
@@ -305,7 +305,7 @@ impl CDCRow<'_> {
 mod tests {
     use super::*;
     use futures::StreamExt;
-    use scylla::Session;
+    use scylla::client::session::Session;
     use scylla_cdc_test_utils::prepare_db;
     use std::sync::Arc;
     // These tests should be indifferent to things like number of Scylla nodes,
