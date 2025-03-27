@@ -6,12 +6,13 @@ use std::time;
 
 use async_trait::async_trait;
 use itertools::Itertools;
-use scylla::frame::response::result::Row;
-use scylla::frame::value;
-use scylla::prepared_statement::PreparedStatement;
-use scylla::transport::errors::{DbError, QueryError};
-use scylla::transport::{PagingState, PagingStateResponse};
-use scylla::{QueryResult, Session};
+use scylla::client::session::Session;
+use scylla::errors::{DbError, ExecutionError, PrepareError, RequestAttemptError};
+use scylla::response::query_result::QueryResult;
+use scylla::response::{PagingState, PagingStateResponse};
+use scylla::statement::prepared::PreparedStatement;
+use scylla::value;
+use scylla::value::Row;
 use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{enabled, warn};
@@ -38,7 +39,7 @@ pub struct CDCReaderConfig {
 /// A wrapper for `Session` objects used to make mocking the Session possible.
 #[async_trait]
 trait StreamSession: Sync + Send {
-    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError>;
+    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, PrepareError>;
     async fn execute_paged_statement(
         &self,
         statement: &PreparedStatement,
@@ -46,12 +47,12 @@ trait StreamSession: Sync + Send {
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
         paging_state: PagingState,
-    ) -> Result<(QueryResult, PagingStateResponse), QueryError>;
+    ) -> Result<(QueryResult, PagingStateResponse), ExecutionError>;
 }
 
 #[async_trait]
 impl StreamSession for Session {
-    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError> {
+    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, PrepareError> {
         self.prepare(query).await
     }
 
@@ -62,7 +63,7 @@ impl StreamSession for Session {
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
         paging_state: PagingState,
-    ) -> Result<(QueryResult, PagingStateResponse), QueryError> {
+    ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
         let (query_result, paging_state_response) = self
             .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
             .await?;
@@ -236,7 +237,11 @@ impl StreamReader {
                     }
                 }
                 Err(
-                    QueryError::TimeoutError | QueryError::DbError(DbError::ReadTimeout { .. }, _),
+                    ExecutionError::RequestTimeout(_)
+                    | ExecutionError::LastAttemptError(RequestAttemptError::DbError(
+                        DbError::ReadTimeout { .. },
+                        _,
+                    )),
                 ) => {
                     self.print_timeout_warning(
                         &window_begin,
@@ -292,8 +297,8 @@ impl StreamReader {
 mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
-    use scylla::query::Query;
-    use scylla::transport::errors::QueryError;
+    use scylla::errors::{ExecutionError, PrepareError, RequestAttemptError};
+    use scylla::statement::unprepared::Statement;
     use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
     use std::sync::atomic::AtomicIsize;
     use std::sync::atomic::Ordering::Relaxed;
@@ -403,7 +408,10 @@ mod tests {
 
     #[async_trait]
     impl StreamSession for TimeoutSession {
-        async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError> {
+        async fn prepare_statement(
+            &self,
+            query: String,
+        ) -> Result<PreparedStatement, PrepareError> {
             self.session.prepare(query).await
         }
 
@@ -414,7 +422,7 @@ mod tests {
             window_begin: &value::CqlTimestamp,
             window_end: &value::CqlTimestamp,
             paging_state: PagingState,
-        ) -> Result<(QueryResult, PagingStateResponse), QueryError> {
+        ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {
                 let read_timeout = DbError::ReadTimeout {
                     consistency: Default::default(),
@@ -422,7 +430,9 @@ mod tests {
                     required: 0,
                     data_present: false,
                 };
-                Err(QueryError::DbError(read_timeout, String::new()))
+                Err(ExecutionError::LastAttemptError(
+                    RequestAttemptError::DbError(read_timeout, String::new()),
+                ))
             } else {
                 let (query_result, paging_state_response) = self
                     .session
@@ -525,7 +535,7 @@ mod tests {
     async fn check_set_upper_timestamp_in_fetch_cdc() {
         let (shared_session, ks) = prepare_simple_db().await.unwrap();
 
-        let mut insert_before_upper_timestamp_query = Query::new(format!(
+        let mut insert_before_upper_timestamp_query = Statement::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
             TEST_TABLE, 0, 0, "val0", "static0"
         ));
@@ -540,7 +550,7 @@ mod tests {
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
         cdc_reader.set_upper_timestamp(now()).await;
 
-        let mut insert_after_upper_timestamp_query = Query::new(format!(
+        let mut insert_after_upper_timestamp_query = Statement::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
             TEST_TABLE, 0, 1, "val1", "static1"
         ));

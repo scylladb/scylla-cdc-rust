@@ -1,10 +1,10 @@
 //! A module containing types related to CDC internal structure.
-use scylla::deserialize::DeserializeValue;
+use scylla::deserialize::value::DeserializeValue;
 use scylla::frame::response::result::ColumnType;
-use scylla::frame::value::CqlTimestamp;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::{CellWriter, WrittenCellProof};
 use scylla::serialize::SerializationError;
+use scylla::value::CqlTimestamp;
 use std::fmt;
 
 /// A struct representing a timestamp of a stream generation.

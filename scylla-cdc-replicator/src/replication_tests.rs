@@ -4,9 +4,9 @@ mod tests {
     use anyhow::anyhow;
     use futures_util::{FutureExt, StreamExt, TryStreamExt};
     use itertools::Itertools;
-    use scylla::frame::response::result::CqlValue::{Boolean, Int, Text, UserDefinedType};
-    use scylla::frame::response::result::{CqlValue, Row};
-    use scylla::Session;
+    use scylla::client::session::Session;
+    use scylla::value::CqlValue::{Boolean, Int, Text, UserDefinedType};
+    use scylla::value::{CqlValue, Row};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
     use scylla_cdc_test_utils::prepare_db;
     use std::sync::Arc;
@@ -56,9 +56,8 @@ mod tests {
             .rows_stream::<Row>()?;
 
         let table_schema = session
-            .get_cluster_data()
-            .get_keyspace_info()
-            .get(ks_dst)
+            .get_cluster_state()
+            .get_keyspace(ks_dst)
             .ok_or_else(|| anyhow!("Keyspace not found"))?
             .tables
             .get(&name.to_ascii_lowercase())
@@ -393,7 +392,7 @@ mod tests {
                 Some(Boolean(true)),
                 Some(UserDefinedType {
                     keyspace: "some_ks".to_string(),
-                    type_name: "user_type".to_string(),
+                    name: "user_type".to_string(),
                     fields: vec![
                         ("int_val".to_string(), Some(Int(7))),
                         ("text_val".to_string(), Some(Text("seven".to_string()))),
@@ -409,7 +408,7 @@ mod tests {
                 Some(Boolean(true)),
                 Some(UserDefinedType {
                     keyspace: "another_ks".to_string(), // Not equal keyspaces should be ignored
-                    type_name: "user_type".to_string(),
+                    name: "user_type".to_string(),
                     fields: vec![
                         ("int_val".to_string(), Some(Int(7))),
                         ("text_val".to_string(), Some(Text("seven".to_string()))),
@@ -431,7 +430,7 @@ mod tests {
                 Some(Boolean(false)),
                 Some(UserDefinedType {
                     keyspace: "some_ks".to_string(),
-                    type_name: "user_type".to_string(),
+                    name: "user_type".to_string(),
                     fields: vec![
                         ("int_val".to_string(), Some(Int(7))),
                         ("text_val".to_string(), Some(Text("seven".to_string()))),
@@ -446,7 +445,7 @@ mod tests {
                 Some(Boolean(false)),
                 Some(UserDefinedType {
                     keyspace: "some_ks".to_string(),
-                    type_name: "user_type".to_string(),
+                    name: "user_type".to_string(),
                     fields: vec![("text_val".to_string(), Some(Text("seven".to_string())))],
                 }),
             ],

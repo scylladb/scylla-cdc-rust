@@ -11,12 +11,13 @@ mod tests {
     use async_trait::async_trait;
     use futures::future::RemoteHandle;
     use itertools::{repeat_n, Itertools};
-    use scylla::frame::response::result::{ColumnType, CqlValue};
-    use scylla::prepared_statement::PreparedStatement;
+    use scylla::client::session::Session;
+    use scylla::frame::response::result::ColumnType;
     use scylla::serialize::value::SerializeValue;
     use scylla::serialize::writers::{CellWriter, WrittenCellProof};
     use scylla::serialize::SerializationError;
-    use scylla::Session;
+    use scylla::statement::prepared::PreparedStatement;
+    use scylla::value::CqlValue;
     use scylla_cdc_test_utils::{now, prepare_db};
     use tokio::sync::Mutex;
 

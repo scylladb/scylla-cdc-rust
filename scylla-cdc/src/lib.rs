@@ -16,7 +16,7 @@
 //! To learn in more detail about how to use the library, please refer to the [tutorial](https://github.com/scylladb/scylla-cdc-rust/blob/main/tutorial.md).
 //! ```rust,no_run
 //! use async_trait::async_trait;
-//! use scylla::SessionBuilder;
+//! use scylla::client::session_builder::SessionBuilder;
 //! use scylla_cdc::consumer::*;
 //! use scylla_cdc::log_reader::CDCLogReaderBuilder;
 //! use std::sync::Arc;

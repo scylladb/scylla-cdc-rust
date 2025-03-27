@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use scylla::SessionBuilder;
+use scylla::client::session_builder::SessionBuilder;
 use scylla_cdc::log_reader::CDCLogReaderBuilder;
 
 use crate::printer::PrinterConsumerFactory;

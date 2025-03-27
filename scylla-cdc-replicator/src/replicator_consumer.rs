@@ -4,16 +4,23 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use itertools::Itertools;
-use scylla::frame::response::result::CqlValue;
-use scylla::frame::response::result::CqlValue::{Map, Set};
-use scylla::prepared_statement::PreparedStatement;
-use scylla::query::Query;
+use scylla::client::session::Session;
+use scylla::cluster::metadata::{CollectionType, ColumnKind, ColumnType, Table};
 use scylla::serialize::row::SerializeRow;
-use scylla::transport::topology::{CollectionType, ColumnKind, CqlType, Table};
-use scylla::Session;
+use scylla::statement::prepared::PreparedStatement;
+use scylla::statement::unprepared::Statement;
+use scylla::value::CqlValue;
+use scylla::value::CqlValue::{Map, Set};
+use thiserror::Error;
 use tracing::warn;
 
 use scylla_cdc::consumer::*;
+
+#[derive(Error, Debug)]
+#[error("Encountered unknown type in CDC table: {typ:?}")]
+struct UnknownTypeError {
+    typ: ColumnType<'static>,
+}
 
 struct PreparedStatementCache {
     queries: HashMap<String, PreparedStatement>,
@@ -318,7 +325,7 @@ async fn run_prepared_statement(
 
 async fn run_statement(
     session: &Arc<Session>,
-    mut query: Query,
+    mut query: Statement,
     values: impl SerializeRow,
     timestamp: i64,
 ) -> anyhow::Result<()> {
@@ -637,7 +644,7 @@ impl ReplicatorConsumer {
             less_than,
         );
 
-        let query = Query::new(format!(
+        let query = Statement::new(format!(
             "DELETE FROM {} WHERE {}",
             self.precomputed_queries
                 .destination_table_params
@@ -766,18 +773,19 @@ impl ReplicatorConsumer {
         values_for_list_update.extend(values.iter());
 
         for column_name in &self.source_table_data.non_key_columns.clone() {
-            match &self
+            let typ = &self
                 .source_table_data
                 .table_schema
                 .columns
                 .get(column_name)
                 .unwrap()
-                .type_
-            {
-                CqlType::Native(_)
-                | CqlType::Tuple(_)
-                | CqlType::Collection { frozen: true, .. }
-                | CqlType::UserDefinedType { frozen: true, .. } => {
+                .typ;
+            match typ {
+                ColumnType::Native(_)
+                | ColumnType::Tuple(_)
+                | ColumnType::Collection { frozen: true, .. }
+                | ColumnType::Vector { .. }
+                | ColumnType::UserDefinedType { frozen: true, .. } => {
                     self.overwrite_column(
                         column_name,
                         &data,
@@ -787,9 +795,9 @@ impl ReplicatorConsumer {
                     )
                     .await?
                 }
-                CqlType::Collection {
+                ColumnType::Collection {
                     frozen: false,
-                    type_: t,
+                    typ: t,
                 } => match t {
                     CollectionType::List(_) => {
                         self.update_list(
@@ -823,8 +831,9 @@ impl ReplicatorConsumer {
                         )
                         .await?
                     }
+                    _ => return Err(UnknownTypeError { typ: typ.clone() }.into()),
                 },
-                CqlType::UserDefinedType { frozen: false, .. } => {
+                ColumnType::UserDefinedType { frozen: false, .. } => {
                     self.update_udt(
                         column_name,
                         &data,
@@ -834,6 +843,7 @@ impl ReplicatorConsumer {
                     )
                     .await?
                 }
+                _ => return Err(UnknownTypeError { typ: typ.clone() }.into()),
             }
         }
 
@@ -891,9 +901,8 @@ impl ReplicatorConsumerFactory {
         dest_table_name: String,
     ) -> anyhow::Result<ReplicatorConsumerFactory> {
         let table_schema = session
-            .get_cluster_data()
-            .get_keyspace_info()
-            .get(&dest_keyspace_name)
+            .get_cluster_state()
+            .get_keyspace(&dest_keyspace_name)
             .ok_or_else(|| anyhow!("Keyspace not found"))?
             .tables
             .get(&dest_table_name.to_ascii_lowercase())

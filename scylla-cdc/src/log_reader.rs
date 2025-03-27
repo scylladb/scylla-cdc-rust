@@ -21,7 +21,7 @@ use anyhow;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
-use scylla::Session;
+use scylla::client::session::Session;
 use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
@@ -207,7 +207,8 @@ impl CDCReaderWorker {
 /// # use scylla_cdc::log_reader::{CDCLogReader, CDCLogReaderBuilder};
 /// # use scylla_cdc::consumer::{ConsumerFactory, Consumer, CDCRow};
 /// # use futures::future::RemoteHandle;
-/// # use scylla::{Session, SessionBuilder};
+/// # use scylla::client::session::Session;
+/// # use scylla::client::session_builder::SessionBuilder;
 /// # use std::sync::Arc;
 /// # use async_trait::async_trait;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
