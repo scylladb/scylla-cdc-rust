@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time;
 
 use async_trait::async_trait;
+use chrono::TimeZone;
 use itertools::Itertools;
 use scylla::frame::response::result::Row;
 use scylla::frame::value;
@@ -155,6 +156,10 @@ impl StreamReader {
             );
         }
 
+        let mut time_since_last_log = std::time::Instant::now();
+        let mut sleep_counter = 0;
+        let min_log_interval = std::time::Duration::from_secs(60);
+        let sleep_interval = chrono::Duration::from_std(self.config.sleep_interval)?;
         loop {
             let now_timestamp =
                 chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
@@ -180,7 +185,29 @@ impl StreamReader {
             window_begin = window_end;
             checkpoint.timestamp = window_begin.to_std()?;
             sender.send(checkpoint.clone())?;
-            sleep(self.config.sleep_interval).await;
+
+            let now_timestamp =
+                chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+
+            if now_timestamp < window_begin + sleep_interval {
+                sleep_counter += 1;
+                sleep(self.config.sleep_interval).await;
+            }
+
+            if min_log_interval < time_since_last_log.elapsed() {
+                let at = chrono::Utc
+                    .timestamp_millis_opt(window_begin.num_milliseconds())
+                    .single()
+                    .map(|value| value.to_rfc3339());
+                tracing::info!("window begin: {at:?}");
+                time_since_last_log = std::time::Instant::now();
+
+                tracing::info!(
+                    "sleep since last log: {:?}",
+                    self.config.sleep_interval * sleep_counter
+                );
+                sleep_counter = 0;
+            }
         }
 
         if self.config.should_save_progress {
