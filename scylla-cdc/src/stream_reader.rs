@@ -160,6 +160,8 @@ impl StreamReader {
         let mut sleep_counter = 0;
         let min_log_interval = std::time::Duration::from_secs(60);
         let sleep_interval = chrono::Duration::from_std(self.config.sleep_interval)?;
+        println!("println - starting loop");
+        tracing::info!("tracing::info - starting loop");
         loop {
             let now_timestamp =
                 chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
@@ -195,18 +197,21 @@ impl StreamReader {
             }
 
             if min_log_interval < time_since_last_log.elapsed() {
-                let at = chrono::Utc
-                    .timestamp_millis_opt(window_begin.num_milliseconds())
-                    .single()
-                    .map(|value| value.to_rfc3339());
-                tracing::info!("window begin: {at:?}");
+                if sleep_counter == 0 {
+                    let at = chrono::Utc
+                        .timestamp_millis_opt(window_begin.num_milliseconds())
+                        .single()
+                        .map(|value| value.to_rfc3339());
+                    println!("window begin: {at:?}");
+                } else {
+                    sleep_counter = 0;
+                }
                 time_since_last_log = std::time::Instant::now();
 
-                tracing::info!(
-                    "sleep since last log: {:?}",
-                    self.config.sleep_interval * sleep_counter
-                );
-                sleep_counter = 0;
+                // println!(
+                //     "sleep since last log: {:?}",
+                //     self.config.sleep_interval * sleep_counter
+                // );
             }
         }
 
