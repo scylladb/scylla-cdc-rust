@@ -20,7 +20,7 @@ use std::fmt::Formatter;
 /// please refer to the documentation of [`crate::log_reader`] module.
 #[async_trait]
 pub trait Consumer: Send {
-    async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()>;
+    async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> anyhow::Result<()>;
 }
 
 /// Trait used to represent a factory of [`Consumer`] instances.

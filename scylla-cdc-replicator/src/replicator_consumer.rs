@@ -858,17 +858,23 @@ fn take_clustering_keys_values(table_schema: &Table, data: &mut CDCRow) -> Vec<O
 
 #[async_trait]
 impl Consumer for ReplicatorConsumer {
-    async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-        match data.operation {
-            OperationType::RowUpdate => self.update(data).await?,
-            OperationType::RowInsert => self.insert(data).await?,
-            OperationType::RowDelete => self.delete_row(data).await?,
-            OperationType::PartitionDelete => self.delete_partition(data).await?,
-            OperationType::RowRangeDelExclLeft => self.delete_row_range_left(data, false),
-            OperationType::RowRangeDelInclLeft => self.delete_row_range_left(data, true),
-            OperationType::RowRangeDelExclRight => self.delete_row_range_right(data, false).await?,
-            OperationType::RowRangeDelInclRight => self.delete_row_range_right(data, true).await?,
-            op => warn!("This type of operation - {:?} - is not supported yet.", op),
+    async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> anyhow::Result<()> {
+        for data in data {
+            match data.operation {
+                OperationType::RowUpdate => self.update(data).await?,
+                OperationType::RowInsert => self.insert(data).await?,
+                OperationType::RowDelete => self.delete_row(data).await?,
+                OperationType::PartitionDelete => self.delete_partition(data).await?,
+                OperationType::RowRangeDelExclLeft => self.delete_row_range_left(data, false),
+                OperationType::RowRangeDelInclLeft => self.delete_row_range_left(data, true),
+                OperationType::RowRangeDelExclRight => {
+                    self.delete_row_range_right(data, false).await?
+                }
+                OperationType::RowRangeDelInclRight => {
+                    self.delete_row_range_right(data, true).await?
+                }
+                op => warn!("This type of operation - {:?} - is not supported yet.", op),
+            }
         }
 
         Ok(())

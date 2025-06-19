@@ -88,7 +88,7 @@ mod tests {
             let batch_seq_no = cdc_row.batch_seq_no;
             if (time, batch_seq_no) > *last_read {
                 *last_read = (time, batch_seq_no);
-                consumer.consume_cdc(cdc_row).await?;
+                consumer.consume_cdc(vec![cdc_row]).await?;
             }
         }
 

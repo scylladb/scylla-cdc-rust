@@ -215,7 +215,7 @@ impl CDCReaderWorker {
 ///
 /// #[async_trait]
 /// impl Consumer for DummyConsumer {
-///     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
+///     async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> anyhow::Result<()> {
 ///         // ... consume received data ...
 ///         Ok(())
 ///     }
@@ -518,7 +518,7 @@ mod tests {
 
     #[async_trait]
     impl Consumer for ErrorConsumer {
-        async fn consume_cdc(&mut self, _: CDCRow<'_>) -> anyhow::Result<()> {
+        async fn consume_cdc(&mut self, _: Vec<CDCRow<'_>>) -> anyhow::Result<()> {
             if (self.condition)(self.id) {
                 Err(anyhow!(ERR_MESSAGE))
             } else {

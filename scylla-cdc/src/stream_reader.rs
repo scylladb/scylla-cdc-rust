@@ -249,12 +249,11 @@ impl StreamReader {
                     page_no += 1;
                     let query_rows_result = query_result.into_rows_result()?;
                     let schema = CDCRowSchema::new(query_rows_result.column_specs());
-                    let rows = query_rows_result.rows::<Row>()?;
-                    for row in rows {
-                        consumer
-                            .consume_cdc(CDCRow::from_row(row?, &schema))
-                            .await?;
-                    }
+                    let rows = query_rows_result
+                        .rows::<Row>()?
+                        .map_ok(|value| CDCRow::from_row(value, &schema))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    consumer.consume_cdc(rows).await?;
                     match paging_state_response {
                         PagingStateResponse::HasMorePages { state } => next_state = state,
                         PagingStateResponse::NoMorePages => break,
@@ -409,14 +408,16 @@ mod tests {
 
     #[async_trait]
     impl Consumer for FetchTestConsumer {
-        async fn consume_cdc(&mut self, mut data: CDCRow<'_>) -> anyhow::Result<()> {
-            let new_val = (
-                data.take_value("pk").unwrap().as_int().unwrap(),
-                data.take_value("s").unwrap().as_text().unwrap().to_string(),
-                data.take_value("t").unwrap().as_int().unwrap(),
-                data.take_value("v").unwrap().as_text().unwrap().to_string(),
-            );
-            self.fetched_rows.lock().await.push(new_val);
+        async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> anyhow::Result<()> {
+            for mut data in data {
+                let new_val = (
+                    data.take_value("pk").unwrap().as_int().unwrap(),
+                    data.take_value("s").unwrap().as_text().unwrap().to_string(),
+                    data.take_value("t").unwrap().as_int().unwrap(),
+                    data.take_value("v").unwrap().as_text().unwrap().to_string(),
+                );
+                self.fetched_rows.lock().await.push(new_val);
+            }
             Ok(())
         }
     }

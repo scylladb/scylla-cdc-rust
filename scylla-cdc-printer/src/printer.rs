@@ -10,51 +10,53 @@ struct PrinterConsumer;
 
 #[async_trait]
 impl Consumer for PrinterConsumer {
-    async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-        let mut row_to_print = String::new();
-        // Print header with cdc-specific columns independent of the schema of base table
-        // (cdc$stream_id, cdc$time, etc.)
-        row_to_print.push_str(&print_row_change_header(&data));
+    async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> anyhow::Result<()> {
+        for data in data {
+            let mut row_to_print = String::new();
+            // Print header with cdc-specific columns independent of the schema of base table
+            // (cdc$stream_id, cdc$time, etc.)
+            row_to_print.push_str(&print_row_change_header(&data));
 
-        // Print columns dependent on the base schema
-        // The appearing order of the columns is undefined
-        let column_names = data.get_non_cdc_column_names();
-        for column in column_names {
-            let value_field_name = column.to_owned();
-            let deleted_elems_field_name = column.to_owned() + "_deleted_elements";
-            let is_value_deleted_field_name = column.to_owned() + "_deleted";
+            // Print columns dependent on the base schema
+            // The appearing order of the columns is undefined
+            let column_names = data.get_non_cdc_column_names();
+            for column in column_names {
+                let value_field_name = column.to_owned();
+                let deleted_elems_field_name = column.to_owned() + "_deleted_elements";
+                let is_value_deleted_field_name = column.to_owned() + "_deleted";
 
-            if data.column_exists(column) {
-                if let Some(value) = data.get_value(column) {
+                if data.column_exists(column) {
+                    if let Some(value) = data.get_value(column) {
+                        row_to_print.push_str(&print_field(
+                            value_field_name.as_str(),
+                            format!("{:?}", value).as_str(),
+                        ));
+                    } else {
+                        row_to_print.push_str(&print_field(value_field_name.as_str(), "null"));
+                    }
+                }
+
+                if data.collection_exists(column) {
                     row_to_print.push_str(&print_field(
-                        value_field_name.as_str(),
-                        format!("{:?}", value).as_str(),
+                        deleted_elems_field_name.as_str(),
+                        format!("{:?}", data.get_deleted_elements(column)).as_str(),
                     ));
-                } else {
-                    row_to_print.push_str(&print_field(value_field_name.as_str(), "null"));
+                }
+
+                if data.column_deletable(column) {
+                    row_to_print.push_str(&print_field(
+                        is_value_deleted_field_name.as_str(),
+                        format!("{:?}", data.is_value_deleted(column)).as_str(),
+                    ));
                 }
             }
 
-            if data.collection_exists(column) {
-                row_to_print.push_str(&print_field(
-                    deleted_elems_field_name.as_str(),
-                    format!("{:?}", data.get_deleted_elements(column)).as_str(),
-                ));
-            }
-
-            if data.column_deletable(column) {
-                row_to_print.push_str(&print_field(
-                    is_value_deleted_field_name.as_str(),
-                    format!("{:?}", data.is_value_deleted(column)).as_str(),
-                ));
-            }
+            // Print end line
+            row_to_print.push_str(
+                "└────────────────────────────────────────────────────────────────────────────┘\n",
+            );
+            println!("{}", row_to_print);
         }
-
-        // Print end line
-        row_to_print.push_str(
-            "└────────────────────────────────────────────────────────────────────────────┘\n",
-        );
-        println!("{}", row_to_print);
 
         Ok(())
     }

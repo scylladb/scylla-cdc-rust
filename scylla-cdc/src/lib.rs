@@ -25,8 +25,10 @@
 //!
 //! #[async_trait]
 //! impl Consumer for TypePrinterConsumer {
-//!     async fn consume_cdc(&mut self, data: CDCRow<'_>) -> anyhow::Result<()> {
-//!         println!("{}", data.operation);
+//!     async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> anyhow::Result<()> {
+//!         for data in data {
+//!             println!("{}", data.operation);
+//!         }
 //!         Ok(())
 //!     }
 //! }

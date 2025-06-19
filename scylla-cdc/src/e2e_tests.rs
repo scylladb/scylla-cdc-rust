@@ -102,34 +102,35 @@ mod tests {
 
     #[async_trait]
     impl Consumer for TestConsumer {
-        async fn consume_cdc(&mut self, mut data: CDCRow<'_>) -> Result<()> {
-            let pk_val = {
-                // Primary key columns have names pk1, pk2...
-                let mut values = Vec::new();
-                let mut i = 1;
-                while data.column_exists(&format!("pk{}", i)) {
-                    let val = data.get_value(&format!("pk{}", i)).as_ref().unwrap();
-                    values.push(PrimaryKeyValue::from_cql(val).unwrap());
-                    i += 1;
-                }
+        async fn consume_cdc(&mut self, data: Vec<CDCRow<'_>>) -> Result<()> {
+            for mut data in data {
+                let pk_val = {
+                    // Primary key columns have names pk1, pk2...
+                    let mut values = Vec::new();
+                    let mut i = 1;
+                    while data.column_exists(&format!("pk{}", i)) {
+                        let val = data.get_value(&format!("pk{}", i)).as_ref().unwrap();
+                        values.push(PrimaryKeyValue::from_cql(val).unwrap());
+                        i += 1;
+                    }
 
-                values
-            };
-            let op_type = data.operation.clone();
-            let ck = match data.take_value("ck") {
-                Some(CqlValue::Int(x)) => Some(x),
-                None => None,
-                Some(cql) => bail!("Unexpected ck type: {:?}", cql),
-            };
-            let val = data.take_value("v").map(|cql| cql.as_int().unwrap());
+                    values
+                };
+                let op_type = data.operation.clone();
+                let ck = match data.take_value("ck") {
+                    Some(CqlValue::Int(x)) => Some(x),
+                    None => None,
+                    Some(cql) => bail!("Unexpected ck type: {:?}", cql),
+                };
+                let val = data.take_value("v").map(|cql| cql.as_int().unwrap());
 
-            self.read_operations
-                .lock()
-                .await
-                .entry(pk_val)
-                .or_insert_with(VecDeque::new)
-                .push_back(Operation::new(op_type, ck, val));
-
+                self.read_operations
+                    .lock()
+                    .await
+                    .entry(pk_val)
+                    .or_insert_with(VecDeque::new)
+                    .push_back(Operation::new(op_type, ck, val));
+            }
             Ok(())
         }
     }
