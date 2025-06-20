@@ -77,8 +77,9 @@ pub trait CDCCheckpointSaver: Send + Sync {
 /// a special row used for storing the latest generation.
 pub struct TableBackedCheckpointSaver {
     session: Arc<Session>,
-    checkpoint_table: String,
     make_checkpoint_stmt: PreparedStatement,
+    select_generation_stmt: PreparedStatement,
+    select_checkpoint_stmt: PreparedStatement,
 }
 
 impl TableBackedCheckpointSaver {
@@ -106,19 +107,37 @@ impl TableBackedCheckpointSaver {
 
         TableBackedCheckpointSaver::create_checkpoints_table(&session, &checkpoint_table).await?;
 
-        let make_checkpoint_stmt = session
+        let mut make_checkpoint_stmt = session
             .prepare(format!(
-                "UPDATE {} USING TTL {}
+                "UPDATE {checkpoint_table} USING TTL {ttl}
                 SET generation = ?, time = ?
                 WHERE stream_id = ?",
-                checkpoint_table, ttl
             ))
             .await?;
+        make_checkpoint_stmt.set_consistency(scylla::statement::Consistency::Quorum);
+
+        let mut select_checkpoint_stmt = session
+            .prepare(format!(
+                "SELECT time FROM {checkpoint_table}
+                WHERE stream_id = ?
+                LIMIT 1",
+            ))
+            .await?;
+        select_checkpoint_stmt.set_consistency(scylla::statement::Consistency::Quorum);
+
+        let mut select_generation_stmt = session
+            .prepare(format!(
+                "SELECT generation FROM {checkpoint_table}
+                WHERE stream_id = ?",
+            ))
+            .await?;
+        select_generation_stmt.set_consistency(scylla::statement::Consistency::Quorum);
 
         let cp_saver = TableBackedCheckpointSaver {
             session,
-            checkpoint_table,
             make_checkpoint_stmt,
+            select_generation_stmt,
+            select_checkpoint_stmt,
         };
 
         Ok(cp_saver)
@@ -187,18 +206,15 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
     async fn load_last_generation(&self) -> anyhow::Result<Option<GenerationTimestamp>> {
         let generation = self
             .session
-            .query_unpaged(
-                format!(
-                    "SELECT generation FROM {}
-                    WHERE stream_id = ?",
-                    self.checkpoint_table
-                ),
-                (get_default_generation_pk(),),
-            )
+            .execute_unpaged(&self.select_generation_stmt, (get_default_generation_pk(),))
             .await?
             .into_rows_result()?
             .maybe_first_row::<(GenerationTimestamp,)>()?
             .map(|row| row.0);
+
+        if generation.is_none() {
+            tracing::error!("No generation found in the checkpoint table.");
+        }
 
         Ok(generation)
     }
@@ -208,21 +224,19 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
         &self,
         stream_id: &StreamID,
     ) -> anyhow::Result<Option<chrono::Duration>> {
-        Ok(self
+        let checkpoint = self
             .session
-            .query_unpaged(
-                format!(
-                    "SELECT time FROM {}
-                    WHERE stream_id = ?
-                    LIMIT 1",
-                    self.checkpoint_table
-                ),
-                (stream_id,),
-            )
+            .execute_unpaged(&self.select_checkpoint_stmt, (stream_id,))
             .await?
             .into_rows_result()?
             .maybe_first_row::<(value::CqlTimestamp,)>()?
-            .map(|t| chrono::Duration::milliseconds(t.0 .0)))
+            .map(|t| chrono::Duration::milliseconds(t.0 .0));
+
+        if checkpoint.is_none() {
+            tracing::error!("No checkpoint found in the checkpoint table for stream {stream_id}.");
+        }
+
+        Ok(checkpoint)
     }
 }
 
