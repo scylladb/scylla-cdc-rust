@@ -21,6 +21,7 @@ use anyhow;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use futures::FutureExt;
+use scylla::statement::Consistency;
 use scylla::Session;
 use tracing::warn;
 
@@ -255,6 +256,7 @@ pub struct CDCLogReaderBuilder {
     should_save_progress: bool,
     checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
     pause_between_saves: time::Duration,
+    consistency: Option<Consistency>,
 }
 
 impl CDCLogReaderBuilder {
@@ -302,6 +304,7 @@ impl CDCLogReaderBuilder {
             should_save_progress,
             checkpoint_saver,
             pause_between_saves,
+            consistency: None,
         }
     }
 
@@ -463,6 +466,7 @@ impl CDCLogReaderBuilder {
             should_save_progress: self.should_save_progress,
             checkpoint_saver: self.checkpoint_saver.clone(),
             pause_between_saves: self.pause_between_saves,
+            consistency: self.consistency,
         };
 
         let mut cdc_reader_worker = CDCReaderWorker {

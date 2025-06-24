@@ -10,6 +10,7 @@ use itertools::Itertools;
 use scylla::frame::response::result::Row;
 use scylla::frame::value;
 use scylla::prepared_statement::PreparedStatement;
+use scylla::statement::Consistency;
 use scylla::transport::errors::{DbError, QueryError};
 use scylla::transport::{PagingState, PagingStateResponse};
 use scylla::{QueryResult, Session};
@@ -34,12 +35,17 @@ pub struct CDCReaderConfig {
     pub should_save_progress: bool,
     pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
     pub pause_between_saves: time::Duration,
+    pub consistency: Option<Consistency>,
 }
 
 /// A wrapper for `Session` objects used to make mocking the Session possible.
 #[async_trait]
 trait StreamSession: Sync + Send {
-    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError>;
+    async fn prepare_statement(
+        &self,
+        query: String,
+        consistency: Option<Consistency>,
+    ) -> Result<PreparedStatement, QueryError>;
     async fn execute_paged_statement(
         &self,
         statement: &PreparedStatement,
@@ -52,8 +58,16 @@ trait StreamSession: Sync + Send {
 
 #[async_trait]
 impl StreamSession for Session {
-    async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError> {
-        self.prepare(query).await
+    async fn prepare_statement(
+        &self,
+        query: String,
+        consistency: Option<Consistency>,
+    ) -> Result<PreparedStatement, QueryError> {
+        let mut statement = self.prepare(query).await?;
+        if let Some(consistency) = consistency {
+            statement.set_consistency(consistency);
+        }
+        Ok(statement)
     }
 
     async fn execute_paged_statement(
@@ -114,7 +128,10 @@ impl StreamReader {
             AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE",
             keyspace, table_name
         );
-        let query_base = self.session.prepare_statement(query).await?;
+        let query_base = self
+            .session
+            .prepare_statement(query, self.config.consistency)
+            .await?;
         let mut window_begin = self.config.lower_timestamp;
         let window_size = chrono::Duration::from_std(self.config.window_size)?;
         let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
@@ -349,6 +366,7 @@ mod tests {
                 should_save_progress: false,
                 checkpoint_saver: None,
                 pause_between_saves: Default::default(),
+                consistency: None,
             };
 
             StreamReader {
@@ -429,8 +447,16 @@ mod tests {
 
     #[async_trait]
     impl StreamSession for TimeoutSession {
-        async fn prepare_statement(&self, query: String) -> Result<PreparedStatement, QueryError> {
-            self.session.prepare(query).await
+        async fn prepare_statement(
+            &self,
+            query: String,
+            consistency: Option<Consistency>,
+        ) -> Result<PreparedStatement, QueryError> {
+            let mut statement = self.session.prepare(query).await?;
+            if let Some(consistency) = consistency {
+                statement.set_consistency(consistency);
+            }
+            Ok(statement)
         }
 
         async fn execute_paged_statement(
