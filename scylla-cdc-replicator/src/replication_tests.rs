@@ -890,7 +890,7 @@ mod tests {
             other_columns: vec![("v", "int")],
         };
 
-        let operations = std::iter::repeat(0..5).take(3).multi_cartesian_product().map(|x| {
+        let operations = std::iter::repeat_n(0..5, 3).multi_cartesian_product().map(|x| {
             format!("INSERT INTO RANGE_DELETE (pk1, pk2, ck1, ck2, ck3, v) VALUES (0, 0, {}, {}, {}, 0)", x[0], x[1], x[2])
         }).collect::<Vec<_>>();
 
