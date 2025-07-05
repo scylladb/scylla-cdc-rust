@@ -695,7 +695,7 @@ impl ReplicatorConsumer {
                 .iter()
                 .join(","),
             relation,
-            std::iter::repeat("?").take(first_null_index).join(",")
+            std::iter::repeat_n("?", first_null_index).join(",")
         );
 
         let query_values = values[..first_null_index].to_vec();
