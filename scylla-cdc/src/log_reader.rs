@@ -36,6 +36,32 @@ const DEFAULT_WINDOW_SIZE: i64 = SECOND_IN_MILLIS * 60;
 const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 30;
 const DEFAULT_PAUSE: u64 = 10;
 
+/// Type of the log table that will be read by the CDCLogReader.
+#[derive(Clone, Copy, Debug)]
+pub enum LogTableType {
+    /// This variant is used to read from the Change Data Capture log tables.
+    /// The suffix of those tables is `_scylla_cdc_log`.
+    ///
+    /// Default variant used by the CDCLogReader.
+    CDC,
+    /// This variant is used to read from the Vector Search Changes log tables.
+    /// The suffix of those tables is `_scylla_vsc_log`.
+    ///
+    /// It is used for internal implementation of **Vector Search Service**,
+    /// should not be used by the default user.
+    VSC,
+}
+
+impl LogTableType {
+    /// Returns the suffix of the log table name.
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            LogTableType::CDC => "_scylla_cdc_log",
+            LogTableType::VSC => "_scylla_vsc_log",
+        }
+    }
+}
+
 /// To create a new CDCLogReader instance please see documentation for [`CDCLogReaderBuilder`]
 pub struct CDCLogReader {
     // Tells the worker to stop
@@ -256,6 +282,7 @@ pub struct CDCLogReaderBuilder {
     should_save_progress: bool,
     checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
     pause_between_saves: time::Duration,
+    log_table: LogTableType,
 }
 
 impl CDCLogReaderBuilder {
@@ -289,6 +316,7 @@ impl CDCLogReaderBuilder {
         let should_save_progress = false;
         let checkpoint_saver = None;
         let pause_between_saves = time::Duration::from_secs(DEFAULT_PAUSE);
+        let log_table = LogTableType::CDC;
         CDCLogReaderBuilder {
             session,
             keyspace,
@@ -303,6 +331,7 @@ impl CDCLogReaderBuilder {
             should_save_progress,
             checkpoint_saver,
             pause_between_saves,
+            log_table,
         }
     }
 
@@ -408,6 +437,13 @@ impl CDCLogReaderBuilder {
         self
     }
 
+    /// Set the type of the log table that will be read by the [`CDCLogReader`].
+    /// By default it is set to `LogTableType::CDC`.
+    pub fn log_table(mut self, value: LogTableType) -> Self {
+        self.log_table = value;
+        self
+    }
+
     /// Build the CDCLogReader after setting all the options
     /// It will fail with an error message if all the required fields are not set.
     /// Currently required fields are the following:
@@ -464,6 +500,7 @@ impl CDCLogReaderBuilder {
             should_save_progress: self.should_save_progress,
             checkpoint_saver: self.checkpoint_saver.clone(),
             pause_between_saves: self.pause_between_saves,
+            log_table: self.log_table,
         };
 
         let mut cdc_reader_worker = CDCReaderWorker {

@@ -20,6 +20,7 @@ use tracing::{enabled, warn};
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{start_saving_checkpoints, CDCCheckpointSaver, Checkpoint};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
+use crate::log_reader::LogTableType;
 
 const BASIC_TIMEOUT_SLEEP_MS: u128 = 10;
 const TIMEOUT_FACTOR: u128 = 2;
@@ -34,6 +35,7 @@ pub struct CDCReaderConfig {
     pub should_save_progress: bool,
     pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
     pub pause_between_saves: time::Duration,
+    pub log_table: LogTableType,
 }
 
 /// A wrapper for `Session` objects used to make mocking the Session possible.
@@ -108,11 +110,13 @@ impl StreamReader {
         mut consumer: Box<dyn Consumer>,
     ) -> anyhow::Result<()> {
         let query = format!(
-            "SELECT * FROM {}.{}_scylla_cdc_log \
+            "SELECT * FROM {}.{}{} \
             WHERE \"cdc$stream_id\" in ? \
             AND \"cdc$time\" >= minTimeuuid(?) \
             AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE",
-            keyspace, table_name
+            keyspace,
+            table_name,
+            self.config.log_table.suffix(),
         );
         let query_base = self.session.prepare_statement(query).await?;
         let mut window_begin = self.config.lower_timestamp;
@@ -330,6 +334,7 @@ mod tests {
                 should_save_progress: false,
                 checkpoint_saver: None,
                 pause_between_saves: Default::default(),
+                log_table: LogTableType::CDC,
             };
 
             StreamReader {
