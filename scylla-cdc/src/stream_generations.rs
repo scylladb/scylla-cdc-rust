@@ -198,12 +198,18 @@ impl GenerationFetcher {
                                         None => sleep(sleep_interval).await,
                                         Some(generation) => break generation.clone(),
                                     },
-                                    _ => warn!("Failed to fetch all generations"),
+                                    _ => {
+                                        warn!("Failed to fetch all generations");
+                                        sleep(sleep_interval).await
+                                    }
                                 }
                             }
                         }
                     }
-                    _ => warn!("Failed to fetch generation by timestamp"),
+                    _ => {
+                        warn!("Failed to fetch generation by timestamp");
+                        sleep(sleep_interval).await
+                    }
                 }
             };
             if generation_sender.send(generation.clone()).await.is_err() {
@@ -215,7 +221,10 @@ impl GenerationFetcher {
                     match self.fetch_next_generation(&generation).await {
                         Ok(Some(generation)) => break generation,
                         Ok(None) => sleep(sleep_interval).await,
-                        _ => warn!("Failed to fetch next generation"),
+                        _ => {
+                            warn!("Failed to fetch next generation");
+                            sleep(sleep_interval).await
+                        }
                     }
                 };
                 if generation_sender.send(generation.clone()).await.is_err() {
