@@ -16,12 +16,12 @@ pub fn now() -> chrono::Duration {
 pub fn unique_name() -> String {
     let cnt = UNIQUE_COUNTER.fetch_add(1, Ordering::SeqCst);
     let name = format!("test_rust_{}_{}", now().num_seconds(), cnt);
-    println!("unique_name: {}", name);
+    println!("unique_name: {name}");
     name
 }
 
 fn get_create_table_query() -> String {
-    format!("CREATE TABLE IF NOT EXISTS {} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};", TEST_TABLE)
+    format!("CREATE TABLE IF NOT EXISTS {TEST_TABLE} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};")
 }
 
 pub async fn create_test_db(
@@ -31,7 +31,7 @@ pub async fn create_test_db(
 ) -> anyhow::Result<String> {
     let ks = unique_name();
     let mut create_keyspace_query = Statement::new(format!(
-        "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': {}}};", ks, replication_factor
+        "CREATE KEYSPACE IF NOT EXISTS {ks} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': {replication_factor}}};"
     ));
     create_keyspace_query.set_consistency(Consistency::All);
 
@@ -52,8 +52,7 @@ pub async fn populate_simple_db_with_pk(session: &Arc<Session>, pk: u32) -> anyh
         session
             .query_unpaged(
                 format!(
-                    "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, 'val{}', 'static{}');",
-                    TEST_TABLE, pk, i, i, i
+                    "INSERT INTO {TEST_TABLE} (pk, t, v, s) VALUES ({pk}, {i}, 'val{i}', 'static{i}');",
                 ),
                 &[],
             )

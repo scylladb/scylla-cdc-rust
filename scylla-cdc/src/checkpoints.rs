@@ -102,16 +102,15 @@ impl TableBackedCheckpointSaver {
         table_name: &str,
         ttl: i64,
     ) -> anyhow::Result<Self> {
-        let checkpoint_table = format!("{}.{}", keyspace, table_name);
+        let checkpoint_table = format!("{keyspace}.{table_name}");
 
         TableBackedCheckpointSaver::create_checkpoints_table(&session, &checkpoint_table).await?;
 
         let make_checkpoint_stmt = session
             .prepare(format!(
-                "UPDATE {} USING TTL {}
+                "UPDATE {checkpoint_table} USING TTL {ttl}
                 SET generation = ?, time = ?
-                WHERE stream_id = ?",
-                checkpoint_table, ttl
+                WHERE stream_id = ?"
             ))
             .await?;
 
@@ -145,11 +144,10 @@ fn get_default_generation_pk() -> StreamID {
 
 fn get_checkpoint_table_schema(table_name: &str) -> String {
     format!(
-        "CREATE TABLE IF NOT EXISTS {} (
+        "CREATE TABLE IF NOT EXISTS {table_name} (
             stream_id blob PRIMARY KEY,
             generation timestamp,
-            time timestamp)",
-        table_name
+            time timestamp)"
     )
 }
 
@@ -255,7 +253,7 @@ mod tests {
 
     async fn get_checkpoints(session: &Arc<Session>, table: &str) -> Vec<Checkpoint> {
         session
-            .query_iter(format!("SELECT * FROM {}", table), ())
+            .query_iter(format!("SELECT * FROM {table}"), ())
             .await
             .unwrap()
             .rows_stream::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()

@@ -108,8 +108,8 @@ mod tests {
                 // Primary key columns have names pk1, pk2...
                 let mut values = Vec::new();
                 let mut i = 1;
-                while data.column_exists(&format!("pk{}", i)) {
-                    let val = data.get_value(&format!("pk{}", i)).as_ref().unwrap();
+                while data.column_exists(&format!("pk{i}")) {
+                    let val = data.get_value(&format!("pk{i}")).as_ref().unwrap();
                     values.push(PrimaryKeyValue::from_cql(val).unwrap());
                     i += 1;
                 }
@@ -164,18 +164,17 @@ mod tests {
             .map(|(i, type_name)| format!("pk{} {}", i + 1, type_name))
             .join(", ");
         let primary_key_tuple = (1..pk_type_names.len() + 1)
-            .map(|i| format!("pk{}", i))
+            .map(|i| format!("pk{i}"))
             .join(", ");
         let binds = repeat_n('?', pk_type_names.len()).join(", ");
         let pk_conditions = (1..pk_type_names.len() + 1)
-            .map(|i| format!("pk{} = ?", i))
+            .map(|i| format!("pk{i} = ?"))
             .join(" AND ");
 
         (
-            format!("CREATE TABLE {} ({}, ck int, v int, primary key (({}), ck)) WITH cdc = {{'enabled' : true}}",
-                    table_name, pk_definitions, primary_key_tuple),
-            format!("INSERT INTO {} (v, {}, ck) VALUES ({}, ?, ?)", table_name, primary_key_tuple, binds),
-            format!("UPDATE {} SET v = ? WHERE {} AND ck = ?", table_name, pk_conditions)
+            format!("CREATE TABLE {table_name} ({pk_definitions}, ck int, v int, primary key (({primary_key_tuple}), ck)) WITH cdc = {{'enabled' : true}}"),
+            format!("INSERT INTO {table_name} (v, {primary_key_tuple}, ck) VALUES ({binds}, ?, ?)"),
+            format!("UPDATE {table_name} SET v = ? WHERE {pk_conditions} AND ck = ?")
         )
     }
 
@@ -260,7 +259,7 @@ mod tests {
                 let mut expected_operations = match self.performed_operations.remove(pk) {
                     Some(ops) => ops,
                     None => {
-                        eprintln!("Unexpected primary key {:?}", pk);
+                        eprintln!("Unexpected primary key {pk:?}");
                         return false;
                     }
                 };
@@ -273,8 +272,8 @@ mod tests {
                             if next_expected == next_actual {
                                 continue;
                             }
-                            eprintln!("Operation no. {} not matching for primary key {:?}.", i, pk);
-                            eprintln!("\tExpected: {:?}, actual: {:?}", next_expected, next_actual);
+                            eprintln!("Operation no. {i} not matching for primary key {pk:?}.");
+                            eprintln!("\tExpected: {next_expected:?}, actual: {next_actual:?}");
                         },
                         (None, None) => return true,
                         (None, _) => eprintln!("Too many read operations for primary key {:?}. Operations left: {}", pk, actual_operations.len() + 1),
@@ -285,7 +284,7 @@ mod tests {
             }).collect::<Vec<_>>();
 
             for pk in self.performed_operations.keys() {
-                eprintln!("Expected primary key {:?} not found", pk);
+                eprintln!("Expected primary key {pk:?} not found");
                 results.push(false);
             }
             results.into_iter().all(identity)

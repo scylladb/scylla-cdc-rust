@@ -291,13 +291,12 @@ mod tests {
     fn construct_generation_table_query() -> String {
         format!(
             "
-    CREATE TABLE IF NOT EXISTS {}(
+    CREATE TABLE IF NOT EXISTS {TEST_GENERATION_TABLE}(
     key text,
     time timestamp,
     expired timestamp,
     PRIMARY KEY (key, time)
-) WITH CLUSTERING ORDER BY (time DESC);",
-            TEST_GENERATION_TABLE
+) WITH CLUSTERING ORDER BY (time DESC);"
         )
     }
 
@@ -305,21 +304,19 @@ mod tests {
     fn construct_stream_table_query() -> String {
         format!(
             "
-    CREATE TABLE IF NOT EXISTS {} (
+    CREATE TABLE IF NOT EXISTS {TEST_STREAM_TABLE} (
     time timestamp,
     range_end bigint,
     streams frozen<set<blob>>,
     PRIMARY KEY (time, range_end)
 ) WITH CLUSTERING ORDER BY (range_end ASC);",
-            TEST_STREAM_TABLE
         )
     }
 
     async fn insert_generation_timestamp(session: &Session, generation: i64) {
         let query = new_distributed_system_query(
             format!(
-                "INSERT INTO {} (key, time, expired) VALUES ('timestamps', ?, NULL);",
-                TEST_GENERATION_TABLE
+                "INSERT INTO {TEST_GENERATION_TABLE} (key, time, expired) VALUES ('timestamps', ?, NULL);",
             ),
             session,
         )
@@ -342,8 +339,7 @@ mod tests {
 
         let query = new_distributed_system_query(
             format!(
-                "INSERT INTO {}(time, range_end, streams) VALUES (?, -1, {{{}, {}}});",
-                TEST_STREAM_TABLE, TEST_STREAM_1, TEST_STREAM_2
+                "INSERT INTO {TEST_STREAM_TABLE}(time, range_end, streams) VALUES (?, -1, {{{TEST_STREAM_1}, {TEST_STREAM_2}}});"
             ),
             session,
         )
