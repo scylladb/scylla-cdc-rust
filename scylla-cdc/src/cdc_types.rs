@@ -55,7 +55,7 @@ pub struct StreamID {
 impl fmt::Display for StreamID {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let encoded_stream_id = hex::encode(self.id.clone());
-        write!(f, "{}", encoded_stream_id)
+        write!(f, "{encoded_stream_id}")
     }
 }
 

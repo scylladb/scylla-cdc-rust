@@ -48,10 +48,7 @@ mod tests {
         last_read: &mut (i64, i32),
     ) -> anyhow::Result<()> {
         let mut result = session
-            .query_iter(
-                format!("SELECT * FROM {}.{}_scylla_cdc_log", ks_src, name),
-                (),
-            )
+            .query_iter(format!("SELECT * FROM {ks_src}.{name}_scylla_cdc_log"), ())
             .await?
             .rows_stream::<Row>()?;
 
@@ -100,12 +97,11 @@ mod tests {
         replicated_rows: &[Row],
         failure_reason: FailureReason,
     ) {
-        eprintln!("Replication test for table {} failed.", table_name);
+        eprintln!("Replication test for table {table_name} failed.");
         eprint!("Failure reason: ");
         match failure_reason {
             FailureReason::WrongRowsCount(o, r) => eprintln!(
-                "Number of rows not matching. Original table: {} rows, replicated table: {} rows.",
-                o, r
+                "Number of rows not matching. Original table: {o} rows, replicated table: {r} rows."
             ),
             FailureReason::RowNotMatching(n) => {
                 eprintln!("Row {} is not equal in both tables.", n + 1)
@@ -164,13 +160,13 @@ mod tests {
         name: &str,
     ) -> anyhow::Result<()> {
         let original_rows = session
-            .query_iter(format!("SELECT * FROM {}.{}", ks_src, name), ())
+            .query_iter(format!("SELECT * FROM {ks_src}.{name}"), ())
             .await?
             .rows_stream::<Row>()?
             .try_collect::<Vec<_>>()
             .await?;
         let replicated_rows = session
-            .query_iter(format!("SELECT * FROM {}.{}", ks_dst, name), ())
+            .query_iter(format!("SELECT * FROM {ks_dst}.{name}"), ())
             .await?
             .rows_stream::<Row>()?
             .try_collect::<Vec<_>>()
@@ -211,10 +207,7 @@ mod tests {
     ) -> anyhow::Result<(Vec<Row>, Vec<Row>)> {
         let original_rows = session
             .query_iter(
-                format!(
-                    "SELECT WRITETIME ({}) FROM {}.{}",
-                    column_name, ks_src, table_name
-                ),
+                format!("SELECT WRITETIME ({column_name}) FROM {ks_src}.{table_name}"),
                 (),
             )
             .await?
@@ -223,10 +216,7 @@ mod tests {
             .await?;
         let replicated_rows = session
             .query_iter(
-                format!(
-                    "SELECT WRITETIME ({}) FROM {}.{}",
-                    column_name, ks_dst, table_name
-                ),
+                format!("SELECT WRITETIME ({column_name}) FROM {ks_dst}.{table_name}"),
                 (),
             )
             .await?
@@ -321,7 +311,7 @@ mod tests {
         let mut schema_queries = get_udt_queries(udt_schemas);
         let create_dst_table_query = get_table_create_query(&table_schema);
         let create_src_table_query =
-            format!("{} WITH cdc = {{'enabled' : true}}", create_dst_table_query);
+            format!("{create_dst_table_query} WITH cdc = {{'enabled' : true}}");
 
         let len = schema_queries.len();
         schema_queries.push(create_src_table_query);
@@ -354,7 +344,7 @@ mod tests {
                 let udt_fields = udt_schema
                     .fields
                     .iter()
-                    .map(|(field_name, field_type)| format!("{} {}", field_name, field_type))
+                    .map(|(field_name, field_type)| format!("{field_name} {field_type}"))
                     .join(",");
                 format!("CREATE TYPE {} ({})", udt_schema.name, udt_fields)
             })
@@ -370,7 +360,7 @@ mod tests {
                 .iter()
                 .chain(schema.clustering_key.iter())
                 .chain(schema.other_columns.iter())
-                .map(|(name, col_type)| format!("{} {}", name, col_type))
+                .map(|(name, col_type)| format!("{name} {col_type}"))
                 .join(","),
             match schema.partition_key.as_slice() {
                 [pk] => pk.0.to_string(),

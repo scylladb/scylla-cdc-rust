@@ -81,73 +81,60 @@ impl PrecomputedQueries {
         // Iterator for both: partition keys and clustering keys.
         let keys_iter = get_keys_iter(table_schema);
 
-        let keyspace_table_name = format!("{}.{}", dest_keyspace_name, dest_table_name);
+        let keyspace_table_name = format!("{dest_keyspace_name}.{dest_table_name}");
         // Clone, because the iterator is consumed.
         let names = keys_iter.clone().join(",");
         let markers = keys_iter.clone().map(|_| "?").join(",");
 
         let insert_query = session
             .prepare(format!(
-                "INSERT INTO {} ({}) VALUES ({}) USING TTL ?",
-                keyspace_table_name, names, markers
+                "INSERT INTO {keyspace_table_name} ({names}) VALUES ({markers}) USING TTL ?"
             ))
             .await
             .expect("Preparing insert query failed.");
 
-        let keys_cond = keys_iter.map(|name| format!("{} = ?", name)).join(" AND ");
+        let keys_cond = keys_iter.map(|name| format!("{name} = ?")).join(" AND ");
         let partition_keys_cond = &table_schema
             .partition_key
             .iter()
-            .map(|name| format!("{} = ?", name))
+            .map(|name| format!("{name} = ?"))
             .join(" AND ");
 
         let partition_delete_query = session
             .prepare(format!(
-                "DELETE FROM {} WHERE {}",
-                keyspace_table_name, partition_keys_cond
+                "DELETE FROM {keyspace_table_name} WHERE {partition_keys_cond}"
             ))
             .await
             .expect("Preparing partition delete query failed.");
 
         let delete_query = session
             .prepare(format!(
-                "DELETE FROM {} WHERE {}",
-                keyspace_table_name, keys_cond
+                "DELETE FROM {keyspace_table_name} WHERE {keys_cond}"
             ))
             .await
             .expect("Preparing delete query failed.");
 
         let (c_ks_t, c_k_c) = (keyspace_table_name.clone(), keys_cond.clone());
         let delete_value_queries = PreparedStatementCache::new(move |column_name| {
-            format!(
-                "UPDATE {} SET {} = NULL WHERE {}",
-                c_ks_t, column_name, c_k_c,
-            )
+            format!("UPDATE {c_ks_t} SET {column_name} = NULL WHERE {c_k_c}")
         });
 
         let (c_ks_t, c_k_c) = (keyspace_table_name.clone(), keys_cond.clone());
         let overwrite_queries = PreparedStatementCache::new(move |column_name| {
-            format!(
-                "UPDATE {} USING TTL ? SET {} = ? WHERE {}",
-                c_ks_t, column_name, c_k_c,
-            )
+            format!("UPDATE {c_ks_t} USING TTL ? SET {column_name} = ? WHERE {c_k_c}")
         });
 
         let (c_ks_t, c_k_c) = (keyspace_table_name.clone(), keys_cond.clone());
         let update_list_elements_queries = PreparedStatementCache::new(move |column_name| {
             format!(
-                "UPDATE {} USING TTL ? SET {}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {}",
-                c_ks_t, column_name, c_k_c,
+                "UPDATE {c_ks_t} USING TTL ? SET {column_name}[SCYLLA_TIMEUUID_LIST_INDEX(?)] = ? WHERE {c_k_c}"
             )
         });
 
         let (c_ks_t, c_k_c) = (keyspace_table_name.clone(), keys_cond.clone());
         let update_map_or_set_elements_queries = PreparedStatementCache::new(move |column_name| {
             format!(
-                "UPDATE {tbl} USING TTL ? SET {cname} = {cname} + ?, {cname} = {cname} - ? WHERE {cond}",
-                tbl = c_ks_t,
-                cname = column_name,
-                cond = c_k_c,
+                "UPDATE {c_ks_t} USING TTL ? SET {column_name} = {column_name} + ?, {column_name} = {column_name} - ? WHERE {c_k_c}"
             )
         });
 
@@ -548,7 +535,7 @@ impl ReplicatorConsumer {
 
         for (i, (field, value)) in udt_fields.iter().enumerate() {
             if value.is_some() || deleted_ids.contains(&i) {
-                let element_name = format!("{}.{}", column_name, field);
+                let element_name = format!("{column_name}.{field}");
                 // Order of values: ttl, updated element, pk condition values.
                 values_for_update[1] = value.as_ref();
                 self.precomputed_queries
@@ -619,7 +606,7 @@ impl ReplicatorConsumer {
         let keys_equality_cond = table_schema
             .partition_key
             .iter()
-            .map(|name| format!("{} = ?", name))
+            .map(|name| format!("{name} = ?"))
             .join(" AND ");
 
         let mut conditions = vec![keys_equality_cond];

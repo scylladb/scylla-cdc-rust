@@ -320,12 +320,11 @@ mod tests {
     fn construct_single_value_table_query() -> String {
         format!(
             "
-    CREATE TABLE IF NOT EXISTS {}(
+    CREATE TABLE IF NOT EXISTS {TEST_SINGLE_VALUE_TABLE}(
     pk int,
     ck int,
     v int,
-    PRIMARY KEY(pk, ck)) WITH cdc = {};",
-            TEST_SINGLE_VALUE_TABLE, CDC_CONFIG
+    PRIMARY KEY(pk, ck)) WITH cdc = {CDC_CONFIG};"
         )
     }
 
@@ -346,12 +345,11 @@ mod tests {
     fn construct_single_collection_table_query() -> String {
         format!(
             "
-    CREATE TABLE IF NOT EXISTS {}(
+    CREATE TABLE IF NOT EXISTS {TEST_SINGLE_COLLECTION_TABLE}(
     pk int,
     ck int,
     vs set<int>,
-    PRIMARY KEY(pk, ck)) WITH cdc = {};",
-            TEST_SINGLE_COLLECTION_TABLE, CDC_CONFIG
+    PRIMARY KEY(pk, ck)) WITH cdc = {CDC_CONFIG};"
         )
     }
 
@@ -359,8 +357,7 @@ mod tests {
         session
             .query_unpaged(
                 format!(
-                    "INSERT INTO {} (pk, ck, vs) VALUES (?, ?, ?);",
-                    TEST_SINGLE_COLLECTION_TABLE
+                    "INSERT INTO {TEST_SINGLE_COLLECTION_TABLE} (pk, ck, vs) VALUES (?, ?, ?);"
                 ),
                 (1, 2, vec![1, 2]),
             )
@@ -389,10 +386,7 @@ mod tests {
     async fn test_query() {
         let session = setup().await.unwrap();
         let mut result = session
-            .query_iter(
-                format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
-                (),
-            )
+            .query_iter(format!("SELECT * FROM {TEST_SINGLE_VALUE_CDC_TABLE};"), ())
             .await
             .unwrap()
             .rows_stream::<Row>()
@@ -489,8 +483,7 @@ mod tests {
                     "SELECT ck, pk, v, \"cdc$deleted_v\",\
                                   \"cdc$time\", \"cdc$stream_id\", \"cdc$batch_seq_no\", \
                                   \"cdc$ttl\", \"cdc$end_of_batch\", \"cdc$operation\"\
-                                  FROM {};",
-                    TEST_SINGLE_VALUE_CDC_TABLE
+                                  FROM {TEST_SINGLE_VALUE_CDC_TABLE};"
                 ),
                 (),
             )
@@ -526,10 +519,7 @@ mod tests {
     async fn test_take_value() {
         let session = setup().await.unwrap();
         let result = session
-            .query_unpaged(
-                format!("SELECT * FROM {};", TEST_SINGLE_VALUE_CDC_TABLE),
-                (),
-            )
+            .query_unpaged(format!("SELECT * FROM {TEST_SINGLE_VALUE_CDC_TABLE};"), ())
             .await
             .unwrap()
             .into_rows_result()
@@ -549,8 +539,7 @@ mod tests {
         session
             .query_unpaged(
                 format!(
-                    "UPDATE {} SET vs = vs - ? WHERE pk = ? AND ck = ?",
-                    TEST_SINGLE_COLLECTION_TABLE
+                    "UPDATE {TEST_SINGLE_COLLECTION_TABLE} SET vs = vs - ? WHERE pk = ? AND ck = ?"
                 ),
                 (vec![2], 1, 2),
             )
@@ -558,8 +547,7 @@ mod tests {
             .unwrap();
         // We must allow filtering in order to search by cdc$operation.
         let result = session
-            .query_unpaged(format!("SELECT * FROM {} WHERE \"cdc$operation\" = ? AND pk = ? AND ck = ? ALLOW FILTERING;",
-                           TEST_SINGLE_COLLECTION_CDC_TABLE), (OperationType::RowUpdate as i8, 1, 2))
+            .query_unpaged(format!("SELECT * FROM {TEST_SINGLE_COLLECTION_CDC_TABLE} WHERE \"cdc$operation\" = ? AND pk = ? AND ck = ? ALLOW FILTERING;"), (OperationType::RowUpdate as i8, 1, 2))
             .await
             .unwrap()
             .into_rows_result()

@@ -108,11 +108,10 @@ impl StreamReader {
         mut consumer: Box<dyn Consumer>,
     ) -> anyhow::Result<()> {
         let query = format!(
-            "SELECT * FROM {}.{}_scylla_cdc_log \
+            "SELECT * FROM {keyspace}.{table_name}_scylla_cdc_log \
             WHERE \"cdc$stream_id\" in ? \
             AND \"cdc$time\" >= minTimeuuid(?) \
-            AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE",
-            keyspace, table_name
+            AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE"
         );
         let query_base = self.session.prepare_statement(query).await?;
         let mut window_begin = self.config.lower_timestamp;
@@ -362,10 +361,8 @@ mod tests {
     }
 
     async fn get_cdc_stream_id(session: &Arc<Session>) -> anyhow::Result<Vec<StreamID>> {
-        let query_stream_id = format!(
-            "SELECT DISTINCT \"cdc$stream_id\" FROM {}_scylla_cdc_log;",
-            TEST_TABLE
-        );
+        let query_stream_id =
+            format!("SELECT DISTINCT \"cdc$stream_id\" FROM {TEST_TABLE}_scylla_cdc_log;");
 
         let mut rows = session
             .query_iter(query_stream_id, ())
@@ -481,15 +478,15 @@ mod tests {
             if pk == partition_key_1 as i32 {
                 assert_eq!(pk, partition_key_1 as i32);
                 assert_eq!(t, count1);
-                assert_eq!(v.to_string(), format!("val{}", count1));
-                assert_eq!(s.to_string(), format!("static{}", count1));
+                assert_eq!(v.to_string(), format!("val{count1}"));
+                assert_eq!(s.to_string(), format!("static{count1}"));
                 count1 += 1;
                 row_count_with_pk1 += 1;
             } else {
                 assert_eq!(pk, partition_key_2 as i32);
                 assert_eq!(t, count2);
-                assert_eq!(v.to_string(), format!("val{}", count2));
-                assert_eq!(s.to_string(), format!("static{}", count2));
+                assert_eq!(v.to_string(), format!("val{count2}"));
+                assert_eq!(s.to_string(), format!("static{count2}"));
                 count2 += 1;
                 row_count_with_pk2 += 1;
             }
@@ -526,8 +523,8 @@ mod tests {
             let (pk, s, t, v) = row.clone();
             assert_eq!(pk, partition_key as i32);
             assert_eq!(t, count as i32);
-            assert_eq!(v.to_string(), format!("val{}", count));
-            assert_eq!(s.to_string(), format!("static{}", count));
+            assert_eq!(v.to_string(), format!("val{count}"));
+            assert_eq!(s.to_string(), format!("static{count}"));
         }
     }
 
@@ -616,8 +613,8 @@ mod tests {
             let (pk, s, t, v) = row.clone();
             assert_eq!(pk, partition_key as i32);
             assert_eq!(t, count as i32);
-            assert_eq!(v.to_string(), format!("val{}", count));
-            assert_eq!(s.to_string(), format!("static{}", count));
+            assert_eq!(v.to_string(), format!("val{count}"));
+            assert_eq!(s.to_string(), format!("static{count}"));
         }
     }
 }

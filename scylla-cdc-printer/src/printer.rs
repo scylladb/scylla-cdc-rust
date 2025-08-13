@@ -28,7 +28,7 @@ impl Consumer for PrinterConsumer {
                 if let Some(value) = data.get_value(column) {
                     row_to_print.push_str(&print_field(
                         value_field_name.as_str(),
-                        format!("{:?}", value).as_str(),
+                        format!("{value:?}").as_str(),
                     ));
                 } else {
                     row_to_print.push_str(&print_field(value_field_name.as_str(), "null"));
@@ -97,7 +97,7 @@ fn print_row_change_header(data: &CDCRow<'_>) -> String {
 }
 
 fn print_field(field_name: &str, field_value: &str) -> String {
-    let mut field_to_print = format!("│ {}: {}", field_name, field_value);
+    let mut field_to_print = format!("│ {field_name}: {field_value}");
     let left_spaces: i64 =
         OUTPUT_WIDTH - field_name.chars().count() as i64 - field_value.chars().count() as i64;
 

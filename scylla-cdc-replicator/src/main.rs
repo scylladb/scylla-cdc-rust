@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
             // The only way this could have happened is an error in on of the CDCLogReaders so we
             // stop all of them.
             result = res.unwrap();
-            println!("{:?}", result);
+            println!("{result:?}");
         }
     }
 
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     while let Some(res) = handles.next().await {
         if res.is_err() {
             result = res;
-            println!("{:?}", result);
+            println!("{result:?}");
         }
     }
     result
