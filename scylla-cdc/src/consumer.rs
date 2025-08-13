@@ -168,7 +168,7 @@ pub struct CDCRow<'schema> {
 }
 
 impl CDCRow<'_> {
-    pub fn from_row(row: Row, schema: &CDCRowSchema) -> CDCRow {
+    pub fn from_row(row: Row, schema: &CDCRowSchema) -> CDCRow<'_> {
         // If cdc read was successful, these default values will not be used.
         let mut stream_id_vec = vec![];
         let mut time = uuid::Uuid::default();
