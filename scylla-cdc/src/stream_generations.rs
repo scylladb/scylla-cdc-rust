@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
+use futures::{future::RemoteHandle, TryStreamExt};
 use scylla::client::session::Session;
 use scylla::statement::unprepared::Statement;
 use scylla::statement::Consistency;
@@ -257,6 +257,180 @@ impl GenerationFetcher for VnodeGenerationFetcher {
         }
 
         Ok(result_vec)
+    }
+}
+
+/// implementation of GenerationFetcher for tablets-based keyspaces.
+pub struct TabletsGenerationFetcher {
+    timestamps_table_name: String,
+    streams_table_name: String,
+    keyspace_name: String,
+    table_name: String,
+    session: Arc<Session>,
+}
+
+// follows stream_state in system.cdc_streams
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i8)]
+enum StreamState {
+    Current = 0,
+    #[allow(dead_code)]
+    Closed = 1,
+    #[allow(dead_code)]
+    Opened = 2,
+}
+
+const TABLETS_TIMESTAMPS_TABLE: &str = "system.cdc_timestamps";
+const TABLETS_STREAMS_TABLE: &str = "system.cdc_streams";
+
+impl TabletsGenerationFetcher {
+    pub fn new(
+        session: &Arc<Session>,
+        keyspace_name: String,
+        table_name: String,
+    ) -> TabletsGenerationFetcher {
+        TabletsGenerationFetcher {
+            timestamps_table_name: TABLETS_TIMESTAMPS_TABLE.to_string(),
+            streams_table_name: TABLETS_STREAMS_TABLE.to_string(),
+            keyspace_name,
+            table_name,
+            session: Arc::clone(session),
+        }
+    }
+
+    fn get_all_stream_generations_query(&self) -> String {
+        format!(
+            r#"
+        SELECT timestamp
+        FROM {}
+        WHERE keyspace_name = ? AND table_name = ?;
+        "#,
+            self.timestamps_table_name
+        )
+    }
+
+    fn get_generation_by_timestamp_query(&self) -> String {
+        format!(
+            r#"
+        SELECT timestamp
+        FROM {}
+        WHERE keyspace_name = ? AND table_name = ? AND timestamp <= ?
+        ORDER BY timestamp DESC
+        LIMIT 1;
+        "#,
+            self.timestamps_table_name
+        )
+    }
+
+    fn get_next_generation_query(&self) -> String {
+        format!(
+            r#"
+        SELECT timestamp
+        FROM {}
+        WHERE keyspace_name = ? AND table_name = ? AND timestamp > ?
+        ORDER BY timestamp ASC
+        LIMIT 1;
+        "#,
+            self.timestamps_table_name
+        )
+    }
+
+    fn get_stream_ids_by_time_query(&self) -> String {
+        format!(
+            r#"
+        SELECT stream_id
+        FROM {}
+        WHERE keyspace_name = ? AND table_name = ? AND timestamp = ? AND stream_state = ?;
+        "#,
+            self.streams_table_name
+        )
+    }
+}
+
+#[async_trait]
+impl GenerationFetcher for TabletsGenerationFetcher {
+    async fn fetch_all_generations(&self) -> anyhow::Result<Vec<GenerationTimestamp>> {
+        let mut query = Statement::new(self.get_all_stream_generations_query());
+        query.set_page_size(DEFAULT_PAGE_SIZE);
+
+        let generations = self
+            .session
+            .query_iter(query, (&self.keyspace_name, &self.table_name))
+            .await?
+            .rows_stream::<(GenerationTimestamp,)>()?
+            .map(|r| r.map(|(ts,)| ts))
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        Ok(generations)
+    }
+
+    async fn fetch_generation_by_timestamp(
+        &self,
+        time: &chrono::Duration,
+    ) -> anyhow::Result<Option<GenerationTimestamp>> {
+        let query = Statement::new(self.get_generation_by_timestamp_query());
+
+        let result = self
+            .session
+            .query_unpaged(
+                query,
+                (
+                    &self.keyspace_name,
+                    &self.table_name,
+                    value::CqlTimestamp(time.num_milliseconds()),
+                ),
+            )
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
+            .map(|(ts,)| ts);
+
+        Ok(result)
+    }
+
+    async fn fetch_next_generation(
+        &self,
+        generation: &GenerationTimestamp,
+    ) -> anyhow::Result<Option<GenerationTimestamp>> {
+        let query = Statement::new(self.get_next_generation_query());
+
+        let result = self
+            .session
+            .query_unpaged(query, (&self.keyspace_name, &self.table_name, generation))
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
+            .map(|(ts,)| ts);
+
+        Ok(result)
+    }
+
+    async fn fetch_stream_ids(
+        &self,
+        generation: &GenerationTimestamp,
+    ) -> anyhow::Result<Vec<Vec<StreamID>>> {
+        let mut query = Statement::new(self.get_stream_ids_by_time_query());
+        query.set_page_size(DEFAULT_PAGE_SIZE);
+
+        let result = self
+            .session
+            .query_iter(
+                query,
+                (
+                    &self.keyspace_name,
+                    &self.table_name,
+                    generation,
+                    StreamState::Current as i8,
+                ),
+            )
+            .await?
+            .rows_stream::<(StreamID,)>()?
+            .map(|r| r.map(|(id,)| vec![id]))
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        Ok(result)
     }
 }
 
