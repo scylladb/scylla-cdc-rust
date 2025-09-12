@@ -27,7 +27,7 @@ use tracing::warn;
 use crate::cdc_types::GenerationTimestamp;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
-use crate::stream_generations::GenerationFetcher;
+use crate::stream_generations::{GenerationFetcher, VnodeGenerationFetcher};
 use crate::stream_reader::{CDCReaderConfig, StreamReader};
 
 const SECOND_IN_MILLIS: i64 = 1_000;
@@ -73,7 +73,7 @@ struct CDCReaderWorker {
 
 impl CDCReaderWorker {
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        let fetcher = Arc::new(GenerationFetcher::new(&self.session));
+        let fetcher = Arc::new(VnodeGenerationFetcher::new(&self.session));
         let (mut generation_receiver, _future_handle) = fetcher
             .clone()
             .fetch_generations_continuously(self.config.lower_timestamp, self.config.sleep_interval)

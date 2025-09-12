@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
 use futures::FutureExt;
@@ -14,172 +15,37 @@ use tracing::warn;
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 
 /// Component responsible for managing stream generations.
-pub struct GenerationFetcher {
-    generations_table_name: String,
-    streams_table_name: String,
-    session: Arc<Session>,
-}
-
-// Number taken from: https://www.scylladb.com/2017/11/17/7-rules-planning-queries-maximum-performance/.
-const DEFAULT_PAGE_SIZE: i32 = 5000;
-
-impl GenerationFetcher {
-    pub fn new(session: &Arc<Session>) -> GenerationFetcher {
-        GenerationFetcher {
-            generations_table_name: "system_distributed.cdc_generation_timestamps".to_string(),
-            streams_table_name: "system_distributed.cdc_streams_descriptions_v2".to_string(),
-            session: Arc::clone(session),
-        }
-    }
-
-    // Function instead of constant for testing purposes.
-    fn get_all_stream_generations_query(&self) -> String {
-        format!(
-            "
-    SELECT time
-    FROM {}
-    WHERE key = 'timestamps';
-    ",
-            self.generations_table_name
-        )
-    }
-
+#[async_trait]
+pub(crate) trait GenerationFetcher: Send + Sync + 'static {
     /// In case of a success returns a vector containing all the generations in the database.
     /// Propagates all errors.
-    pub async fn fetch_all_generations(&self) -> anyhow::Result<Vec<GenerationTimestamp>> {
-        let mut generations = Vec::new();
-
-        let mut query =
-            new_distributed_system_query(self.get_all_stream_generations_query(), &self.session)
-                .await?;
-        query.set_page_size(DEFAULT_PAGE_SIZE);
-
-        let mut rows = self
-            .session
-            .query_iter(query, &[])
-            .await?
-            .rows_stream::<(GenerationTimestamp,)>()?;
-
-        while let Some(generation) = rows.next().await {
-            generations.push(generation?.0)
-        }
-
-        Ok(generations)
-    }
-
-    // Function instead of constant for testing purposes.
-    fn get_generation_by_timestamp_query(&self) -> String {
-        format!(
-            "
-    SELECT time
-    FROM {}
-    WHERE key = 'timestamps'
-    AND time <= ?
-    ORDER BY time DESC
-    LIMIT 1;
-    ",
-            self.generations_table_name
-        )
-    }
+    async fn fetch_all_generations(&self) -> anyhow::Result<Vec<GenerationTimestamp>>;
 
     /// Given a timestamp of an operation fetch generation that was operating when this operation was performed.
     /// If no such generation exists, returns `None`.
     /// Propagates errors.
-    pub async fn fetch_generation_by_timestamp(
+    async fn fetch_generation_by_timestamp(
         &self,
         time: &chrono::Duration,
-    ) -> anyhow::Result<Option<GenerationTimestamp>> {
-        let query =
-            new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
-                .await?;
-
-        let result = self
-            .session
-            .query_unpaged(query, (value::CqlTimestamp(time.num_milliseconds()),))
-            .await?
-            .into_rows_result()?
-            .maybe_first_row::<(GenerationTimestamp,)>()?
-            .map(|(ts,)| ts);
-
-        Ok(result)
-    }
-
-    // Function instead of constant for testing purposes.
-    fn get_next_generation_query(&self) -> String {
-        format!(
-            "
-    SELECT time
-    FROM {}
-    WHERE key = 'timestamps'
-    AND time > ?
-    ORDER BY time ASC
-    LIMIT 1;
-    ",
-            self.generations_table_name
-        )
-    }
+    ) -> anyhow::Result<Option<GenerationTimestamp>>;
 
     /// Given a generation returns the next generation.
     /// If given generation is currently operating, returns `None`.
     /// Propagates errors.
-    pub async fn fetch_next_generation(
+    async fn fetch_next_generation(
         &self,
         generation: &GenerationTimestamp,
-    ) -> anyhow::Result<Option<GenerationTimestamp>> {
-        let query =
-            new_distributed_system_query(self.get_next_generation_query(), &self.session).await?;
+    ) -> anyhow::Result<Option<GenerationTimestamp>>;
 
-        let result = self
-            .session
-            .query_unpaged(query, (generation,))
-            .await?
-            .into_rows_result()?
-            .maybe_first_row::<(GenerationTimestamp,)>()?
-            .map(|(ts,)| ts);
-
-        Ok(result)
-    }
-
-    // Function instead of constant for testing purposes.
-    fn get_stream_ids_by_time_query(&self) -> String {
-        format!(
-            "
-    SELECT streams
-    FROM {}
-    WHERE time = ?;
-    ",
-            self.streams_table_name
-        )
-    }
-
-    /// Given a generation return identifiers of all streams of this generation.
-    /// Streams are grouped by vnodes.
-    pub async fn fetch_stream_ids(
+    /// Given a generation return grouped identifiers of all streams of this generation.
+    async fn fetch_stream_ids(
         &self,
         generation: &GenerationTimestamp,
-    ) -> anyhow::Result<Vec<Vec<StreamID>>> {
-        let mut result_vec = Vec::new();
+    ) -> anyhow::Result<Vec<Vec<StreamID>>>;
 
-        let mut query =
-            new_distributed_system_query(self.get_stream_ids_by_time_query(), &self.session)
-                .await?;
-        query.set_page_size(DEFAULT_PAGE_SIZE);
-
-        let mut rows = self
-            .session
-            .query_iter(query, (generation,))
-            .await?
-            .rows_stream::<(Vec<StreamID>,)>()?;
-
-        while let Some(next_row) = rows.next().await {
-            let (ids,) = next_row?;
-            result_vec.push(ids);
-        }
-
-        Ok(result_vec)
-    }
-
-    pub async fn fetch_generations_continuously(
+    /// Continuously monitors and fetches new generations as they become available.
+    /// Returns a receiver for new generations and a handle to the background task.
+    async fn fetch_generations_continuously(
         self: Arc<Self>,
         start_timestamp: chrono::Duration,
         sleep_interval: time::Duration,
@@ -238,6 +104,162 @@ impl GenerationFetcher {
     }
 }
 
+/// implementation of GenerationFetcher for vnodes-based keyspaces.
+pub struct VnodeGenerationFetcher {
+    generations_table_name: String,
+    streams_table_name: String,
+    session: Arc<Session>,
+}
+
+// Number taken from: https://www.scylladb.com/2017/11/17/7-rules-planning-queries-maximum-performance/.
+const DEFAULT_PAGE_SIZE: i32 = 5000;
+
+const VNODE_GENERATIONS_TABLE: &str = "system_distributed.cdc_generation_timestamps";
+const VNODE_STREAMS_TABLE: &str = "system_distributed.cdc_streams_descriptions_v2";
+
+impl VnodeGenerationFetcher {
+    pub fn new(session: &Arc<Session>) -> VnodeGenerationFetcher {
+        VnodeGenerationFetcher {
+            generations_table_name: VNODE_GENERATIONS_TABLE.to_string(),
+            streams_table_name: VNODE_STREAMS_TABLE.to_string(),
+            session: Arc::clone(session),
+        }
+    }
+
+    // Function instead of constant for testing purposes.
+    fn get_all_stream_generations_query(&self) -> String {
+        format!(
+            "
+        SELECT time
+        FROM {}
+        WHERE key = 'timestamps';",
+            self.generations_table_name
+        )
+    }
+
+    fn get_generation_by_timestamp_query(&self) -> String {
+        format!(
+            "
+        SELECT time
+        FROM {}
+        WHERE key = 'timestamps'
+        AND time <= ?
+        ORDER BY time DESC
+        LIMIT 1;",
+            self.generations_table_name
+        )
+    }
+
+    fn get_next_generation_query(&self) -> String {
+        format!(
+            "
+        SELECT time
+        FROM {}
+        WHERE key = 'timestamps'
+        AND time > ?
+        ORDER BY time ASC
+        LIMIT 1;",
+            self.generations_table_name
+        )
+    }
+
+    fn get_stream_ids_by_time_query(&self) -> String {
+        format!(
+            "
+        SELECT streams
+        FROM {}
+        WHERE time = ?;",
+            self.streams_table_name
+        )
+    }
+}
+
+#[async_trait]
+impl GenerationFetcher for VnodeGenerationFetcher {
+    async fn fetch_all_generations(&self) -> anyhow::Result<Vec<GenerationTimestamp>> {
+        let mut generations = Vec::new();
+        let mut query =
+            new_distributed_system_query(self.get_all_stream_generations_query(), &self.session)
+                .await?;
+        query.set_page_size(DEFAULT_PAGE_SIZE);
+
+        let mut rows = self
+            .session
+            .query_iter(query, &[])
+            .await?
+            .rows_stream::<(GenerationTimestamp,)>()?;
+
+        while let Some(generation) = rows.next().await {
+            generations.push(generation?.0)
+        }
+
+        Ok(generations)
+    }
+
+    async fn fetch_generation_by_timestamp(
+        &self,
+        time: &chrono::Duration,
+    ) -> anyhow::Result<Option<GenerationTimestamp>> {
+        let query =
+            new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
+                .await?;
+
+        let result = self
+            .session
+            .query_unpaged(query, (value::CqlTimestamp(time.num_milliseconds()),))
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
+            .map(|(ts,)| ts);
+
+        Ok(result)
+    }
+
+    async fn fetch_next_generation(
+        &self,
+        generation: &GenerationTimestamp,
+    ) -> anyhow::Result<Option<GenerationTimestamp>> {
+        let query =
+            new_distributed_system_query(self.get_next_generation_query(), &self.session).await?;
+
+        let result = self
+            .session
+            .query_unpaged(query, (generation,))
+            .await?
+            .into_rows_result()?
+            .maybe_first_row::<(GenerationTimestamp,)>()?
+            .map(|(ts,)| ts);
+
+        Ok(result)
+    }
+
+    // Streams are grouped by vnodes
+    async fn fetch_stream_ids(
+        &self,
+        generation: &GenerationTimestamp,
+    ) -> anyhow::Result<Vec<Vec<StreamID>>> {
+        let mut result_vec = Vec::new();
+
+        let mut query =
+            new_distributed_system_query(self.get_stream_ids_by_time_query(), &self.session)
+                .await?;
+        query.set_page_size(DEFAULT_PAGE_SIZE);
+
+        let mut rows = self
+            .session
+            .query_iter(query, (generation,))
+            .await?
+            .rows_stream::<(Vec<StreamID>,)>()?;
+
+        while let Some(next_row) = rows.next().await {
+            let (ids,) = next_row?;
+            result_vec.push(ids);
+        }
+
+        Ok(result_vec)
+    }
+}
+
 // Returns current cluster size in case of a success.
 async fn get_cluster_size(session: &Session) -> anyhow::Result<usize> {
     // We are using default consistency here since the system keyspace is special and
@@ -285,10 +307,10 @@ mod tests {
     const TEST_STREAM_1: &str = "0x7fb9f781956cea08c651295720000001";
     const TEST_STREAM_2: &str = "0x7fc0000000000000c298b9f168000001";
 
-    impl GenerationFetcher {
+    impl VnodeGenerationFetcher {
         // Constructor intended for testing purposes.
-        fn test_new(session: &Arc<Session>) -> GenerationFetcher {
-            GenerationFetcher {
+        fn test_new(session: &Arc<Session>) -> VnodeGenerationFetcher {
+            VnodeGenerationFetcher {
                 streams_table_name: TEST_STREAM_TABLE.to_string(),
                 generations_table_name: TEST_GENERATION_TABLE.to_string(),
                 session: Arc::clone(session),
@@ -362,7 +384,7 @@ mod tests {
     }
 
     // Create setup for tests.
-    async fn setup() -> anyhow::Result<GenerationFetcher> {
+    async fn setup() -> anyhow::Result<VnodeGenerationFetcher> {
         let session = prepare_db(
             &[
                 construct_generation_table_query(),
@@ -374,7 +396,7 @@ mod tests {
         .0;
         populate_test_db(&session).await;
 
-        let generation_fetcher = GenerationFetcher::test_new(&session);
+        let generation_fetcher = VnodeGenerationFetcher::test_new(&session);
 
         Ok(generation_fetcher)
     }
