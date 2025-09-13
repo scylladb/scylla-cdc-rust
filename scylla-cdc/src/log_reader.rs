@@ -58,6 +58,27 @@ impl CDCLogReader {
     pub fn stop(&mut self) {
         self.stop_at(chrono::Duration::MIN);
     }
+
+    /// Checks if the given keyspace uses tablets by querying system_schema.scylla_keyspaces.
+    async fn uses_tablets(session: &Session, keyspace: &str) -> anyhow::Result<bool> {
+        let query =
+            "SELECT initial_tablets FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?"
+                .to_string();
+        // the query may fail on old scylla versions that don't have this table. in this case return
+        // false because it doesn't support tablets.
+        let result = match session.query_unpaged(query, (keyspace,)).await {
+            Ok(r) => r,
+            Err(_) => return Ok(false),
+        };
+        let rows_result = result.into_rows_result()?;
+        let value = rows_result.maybe_first_row::<(Option<i32>,)>()?;
+        if let Some((tablets_val,)) = value {
+            if tablets_val.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 struct CDCReaderWorker {
@@ -69,6 +90,7 @@ struct CDCReaderWorker {
     end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
     consumer_factory: Arc<dyn ConsumerFactory>,
     config: CDCReaderConfig,
+    uses_tablets: bool,
 }
 
 impl CDCReaderWorker {
@@ -455,6 +477,8 @@ impl CDCLogReaderBuilder {
             }
         }
 
+        let uses_tablets = CDCLogReader::uses_tablets(&session, &keyspace).await?;
+
         let config = CDCReaderConfig {
             lower_timestamp: start_timestamp,
             window_size: self.window_size,
@@ -475,6 +499,7 @@ impl CDCLogReaderBuilder {
             end_timestamp_receiver,
             consumer_factory,
             config,
+            uses_tablets,
         };
 
         let (fut, handle) = async move { cdc_reader_worker.run().await }.remote_handle();
