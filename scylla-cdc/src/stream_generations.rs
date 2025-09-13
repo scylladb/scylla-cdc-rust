@@ -468,6 +468,23 @@ async fn new_distributed_system_query(
     Ok(query)
 }
 
+pub fn get_generation_fetcher(
+    session: &Arc<scylla::client::session::Session>,
+    keyspace: &str,
+    table_name: &str,
+    uses_tablets: bool,
+) -> Arc<dyn GenerationFetcher> {
+    if uses_tablets {
+        Arc::new(TabletsGenerationFetcher::new(
+            session,
+            keyspace.to_string(),
+            table_name.to_string(),
+        ))
+    } else {
+        Arc::new(VnodeGenerationFetcher::new(session))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
