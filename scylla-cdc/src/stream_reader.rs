@@ -296,6 +296,7 @@ impl StreamReader {
 mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
+    use rstest::rstest;
     use scylla::errors::{ExecutionError, PrepareError, RequestAttemptError};
     use scylla::statement::unprepared::Statement;
     use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
@@ -440,9 +441,12 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn check_fetch_cdc_with_multiple_stream_id() {
-        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
+    async fn check_fetch_cdc_with_multiple_stream_id(#[case] tablets_enabled: bool) {
+        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;
@@ -496,9 +500,12 @@ mod tests {
         assert_eq!(row_count_with_pk1, 3);
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn check_fetch_cdc_with_one_stream_id() {
-        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
+    async fn check_fetch_cdc_with_one_stream_id(#[case] tablets_enabled: bool) {
+        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
 
         let partition_key = 0;
         populate_simple_db_with_pk(&shared_session, partition_key)
@@ -528,9 +535,12 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn check_set_upper_timestamp_in_fetch_cdc() {
-        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
+    async fn check_set_upper_timestamp_in_fetch_cdc(#[case] tablets_enabled: bool) {
+        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
 
         let mut insert_before_upper_timestamp_query = Statement::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
@@ -578,9 +588,12 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn timeout_retry_test() {
-        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
+    async fn timeout_retry_test(#[case] tablets_enabled: bool) {
+        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
 
         let partition_key = 0;
         populate_simple_db_with_pk(&shared_session, partition_key)
