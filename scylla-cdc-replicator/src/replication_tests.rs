@@ -315,9 +315,9 @@ mod tests {
 
         let len = schema_queries.len();
         schema_queries.push(create_src_table_query);
-        let (session, ks_src) = prepare_db(&schema_queries, 1).await?;
+        let (session, ks_src) = prepare_db(&schema_queries, 1, false).await?;
         schema_queries[len] = create_dst_table_query;
-        let (_, ks_dst) = prepare_db(&schema_queries, 1).await?;
+        let (_, ks_dst) = prepare_db(&schema_queries, 1, false).await?;
         session.refresh_metadata().await?;
         let mut last_read = (0, 0);
 

@@ -24,14 +24,33 @@ fn get_create_table_query() -> String {
     format!("CREATE TABLE IF NOT EXISTS {TEST_TABLE} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};")
 }
 
+fn get_create_keyspace_query(
+    keyspace: &str,
+    replication_factor: u8,
+    tablets_enabled: bool,
+) -> String {
+    let tablets_clause = if tablets_enabled {
+        " AND tablets={'enabled': true}"
+    } else {
+        " AND tablets={'enabled': false}"
+    };
+
+    format!(
+        "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH REPLICATION = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {replication_factor}}}{tablets_clause};"
+    )
+}
+
 pub async fn create_test_db(
     session: &Arc<Session>,
     schema: &[String],
     replication_factor: u8,
+    tablets_enabled: bool,
 ) -> anyhow::Result<String> {
     let ks = unique_name();
-    let mut create_keyspace_query = Statement::new(format!(
-        "CREATE KEYSPACE IF NOT EXISTS {ks} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': {replication_factor}}};"
+    let mut create_keyspace_query = Statement::new(get_create_keyspace_query(
+        &ks,
+        replication_factor,
+        tablets_enabled,
     ));
     create_keyspace_query.set_consistency(Consistency::All);
 
@@ -68,15 +87,16 @@ fn get_uri() -> String {
 pub async fn prepare_db(
     schema: &[String],
     replication_factor: u8,
+    tablets_enabled: bool,
 ) -> anyhow::Result<(Arc<Session>, String)> {
     let uri = get_uri();
     let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let shared_session = Arc::new(session);
 
-    let ks = create_test_db(&shared_session, schema, replication_factor).await?;
+    let ks = create_test_db(&shared_session, schema, replication_factor, tablets_enabled).await?;
     Ok((shared_session, ks))
 }
 
-pub async fn prepare_simple_db() -> anyhow::Result<(Arc<Session>, String)> {
-    prepare_db(&[get_create_table_query()], 1).await
+pub async fn prepare_simple_db(tablets_enabled: bool) -> anyhow::Result<(Arc<Session>, String)> {
+    prepare_db(&[get_create_table_query()], 1, tablets_enabled).await
 }

@@ -372,6 +372,7 @@ mod tests {
                 construct_single_collection_table_query(),
             ],
             1,
+            false,
         )
         .await?
         .0;

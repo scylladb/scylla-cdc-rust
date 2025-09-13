@@ -573,7 +573,7 @@ mod tests {
             next_id: Arc::new(AtomicUsize::new(0)),
             condition,
         });
-        let (session, ks) = prepare_simple_db().await.unwrap();
+        let (session, ks) = prepare_simple_db(false).await.unwrap();
         let start = now();
         for i in 0..pk_count {
             populate_simple_db_with_pk(&session, i).await.unwrap();

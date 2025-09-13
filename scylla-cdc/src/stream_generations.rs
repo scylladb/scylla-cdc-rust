@@ -587,6 +587,7 @@ mod tests {
                     construct_stream_table_query(),
                 ],
                 1,
+                false,
             )
             .await?
             .0;
@@ -638,7 +639,7 @@ mod tests {
 
         // TabletsGenerationFetcher tests
         pub(super) async fn setup() -> anyhow::Result<TabletsGenerationFetcher> {
-            let session = Arc::new(prepare_db(&[], 1).await?.0);
+            let session = Arc::new(prepare_db(&[], 1, false).await?.0);
             // Create CDC tables for tablets in the current keyspace
             session
                 .query_unpaged(

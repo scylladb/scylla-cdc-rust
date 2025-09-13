@@ -191,7 +191,7 @@ mod tests {
         async fn new(table_name: &str, pk_type_names: Vec<&str>) -> Result<Test> {
             let (create_query, insert_query, update_query) = get_queries(table_name, pk_type_names);
 
-            let (session, keyspace) = prepare_db(&[create_query], 1).await?;
+            let (session, keyspace) = prepare_db(&[create_query], 1, false).await?;
             let insert_query = session.prepare(insert_query).await?;
             let update_query = session.prepare(update_query).await?;
 

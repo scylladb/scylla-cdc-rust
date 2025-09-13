@@ -239,7 +239,7 @@ mod tests {
 
     async fn setup() -> (Arc<Session>, String, Arc<TableBackedCheckpointSaver>) {
         const DEFAULT_TTL: i64 = 300;
-        let (session, ks) = prepare_db(&[], 1).await.unwrap();
+        let (session, ks) = prepare_db(&[], 1, false).await.unwrap();
         let table_name = unique_name();
 
         let cp_saver = Arc::new(

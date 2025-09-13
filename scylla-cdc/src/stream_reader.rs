@@ -442,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_multiple_stream_id() {
-        let (shared_session, ks) = prepare_simple_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;
@@ -498,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_fetch_cdc_with_one_stream_id() {
-        let (shared_session, ks) = prepare_simple_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
 
         let partition_key = 0;
         populate_simple_db_with_pk(&shared_session, partition_key)
@@ -530,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_set_upper_timestamp_in_fetch_cdc() {
-        let (shared_session, ks) = prepare_simple_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
 
         let mut insert_before_upper_timestamp_query = Statement::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
@@ -580,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_retry_test() {
-        let (shared_session, ks) = prepare_simple_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
 
         let partition_key = 0;
         populate_simple_db_with_pk(&shared_session, partition_key)
