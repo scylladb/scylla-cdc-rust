@@ -11,6 +11,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::future::RemoteHandle;
     use itertools::{repeat_n, Itertools};
+    use rstest::rstest;
     use scylla::client::session::Session;
     use scylla::frame::response::result::ColumnType;
     use scylla::serialize::value::SerializeValue;
@@ -188,10 +189,14 @@ mod tests {
     }
 
     impl Test {
-        async fn new(table_name: &str, pk_type_names: Vec<&str>) -> Result<Test> {
+        async fn new(
+            table_name: &str,
+            pk_type_names: Vec<&str>,
+            tablets_enabled: bool,
+        ) -> Result<Test> {
             let (create_query, insert_query, update_query) = get_queries(table_name, pk_type_names);
 
-            let (session, keyspace) = prepare_db(&[create_query], 1, false).await?;
+            let (session, keyspace) = prepare_db(&[create_query], 1, tablets_enabled).await?;
             let insert_query = session.prepare(insert_query).await?;
             let update_query = session.prepare(update_query).await?;
 
@@ -322,9 +327,14 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn e2e_test_small() {
-        let mut test = Test::new("int_small_test", vec!["int"]).await.unwrap();
+    async fn e2e_test_small(#[case] tablets_enabled: bool) {
+        let mut test = Test::new("int_small_test", vec!["int"], tablets_enabled)
+            .await
+            .unwrap();
         let start = now();
 
         for i in 0..10 {
@@ -346,9 +356,14 @@ mod tests {
         test.test_cdc(start).await.unwrap();
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn e2e_test_int_pk() {
-        let mut test = Test::new("int_test", vec!["int"]).await.unwrap();
+    async fn e2e_test_int_pk(#[case] tablets_enabled: bool) {
+        let mut test = Test::new("int_test", vec!["int"], tablets_enabled)
+            .await
+            .unwrap();
         let start = now();
 
         for i in 0..100 {
@@ -370,9 +385,12 @@ mod tests {
         test.test_cdc(start).await.unwrap();
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn e2e_test_int_string_pk() {
-        let mut test = Test::new("int_string_test", vec!["int", "text"])
+    async fn e2e_test_int_string_pk(#[case] tablets_enabled: bool) {
+        let mut test = Test::new("int_string_test", vec!["int", "text"], tablets_enabled)
             .await
             .unwrap();
         let strings = ["blep".to_string(), "nghu".to_string(), "pkeee".to_string()];
@@ -459,13 +477,18 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn e2e_test_saving_progress_complex() {
+    async fn e2e_test_saving_progress_complex(#[case] tablets_enabled: bool) {
         const N: i32 = 5;
         let table_name = "test_saving_progress";
         let start = now();
 
-        let mut test = Test::new(table_name, vec!["int"]).await.unwrap();
+        let mut test = Test::new(table_name, vec!["int"], tablets_enabled)
+            .await
+            .unwrap();
 
         let results = Arc::new(Mutex::new(HashMap::new()));
         let factory = Arc::new(TestConsumerFactory::new(Arc::clone(&results)));
