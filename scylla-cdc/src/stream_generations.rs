@@ -470,56 +470,61 @@ async fn new_distributed_system_query(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use scylla_cdc_test_utils::prepare_db;
 
     use super::*;
 
-    const TEST_STREAM_TABLE: &str = "cdc_streams_descriptions_v2";
-    const TEST_GENERATION_TABLE: &str = "cdc_generation_timestamps";
     const GENERATION_NEW_MILLISECONDS: i64 = 1635882326384;
     const GENERATION_OLD_MILLISECONDS: i64 = 1635882224341;
     const TEST_STREAM_1: &str = "0x7fb9f781956cea08c651295720000001";
     const TEST_STREAM_2: &str = "0x7fc0000000000000c298b9f168000001";
 
-    impl VnodeGenerationFetcher {
-        // Constructor intended for testing purposes.
-        fn test_new(session: &Arc<Session>) -> VnodeGenerationFetcher {
-            VnodeGenerationFetcher {
-                streams_table_name: TEST_STREAM_TABLE.to_string(),
-                generations_table_name: TEST_GENERATION_TABLE.to_string(),
-                session: Arc::clone(session),
+    mod vnode_tests {
+        use super::*;
+
+        const TEST_STREAM_TABLE: &str = "cdc_streams_descriptions_v2";
+        const TEST_GENERATION_TABLE: &str = "cdc_generation_timestamps";
+
+        impl VnodeGenerationFetcher {
+            // Constructor intended for testing purposes.
+            fn test_new(session: &Arc<Session>) -> VnodeGenerationFetcher {
+                VnodeGenerationFetcher {
+                    streams_table_name: TEST_STREAM_TABLE.to_string(),
+                    generations_table_name: TEST_GENERATION_TABLE.to_string(),
+                    session: Arc::clone(session),
+                }
             }
         }
-    }
 
-    // Constructs mock table with the same schema as the original one's.
-    fn construct_generation_table_query() -> String {
-        format!(
-            "
+        // Constructs mock table with the same schema as the original one's.
+        fn construct_generation_table_query() -> String {
+            format!(
+                "
     CREATE TABLE IF NOT EXISTS {TEST_GENERATION_TABLE}(
     key text,
     time timestamp,
     expired timestamp,
     PRIMARY KEY (key, time)
 ) WITH CLUSTERING ORDER BY (time DESC);"
-        )
-    }
+            )
+        }
 
-    // Constructs mock table with the same schema as the original one's.
-    fn construct_stream_table_query() -> String {
-        format!(
-            "
+        // Constructs mock table with the same schema as the original one's.
+        fn construct_stream_table_query() -> String {
+            format!(
+                "
     CREATE TABLE IF NOT EXISTS {TEST_STREAM_TABLE} (
     time timestamp,
     range_end bigint,
     streams frozen<set<blob>>,
     PRIMARY KEY (time, range_end)
 ) WITH CLUSTERING ORDER BY (range_end ASC);",
-        )
-    }
+            )
+        }
 
-    async fn insert_generation_timestamp(session: &Session, generation: i64) {
-        let query = new_distributed_system_query(
+        pub(super) async fn insert_generation_timestamp(session: &Session, generation: i64) {
+            let query = new_distributed_system_query(
             format!(
                 "INSERT INTO {TEST_GENERATION_TABLE} (key, time, expired) VALUES ('timestamps', ?, NULL);",
             ),
@@ -528,56 +533,195 @@ mod tests {
         .await
         .unwrap();
 
-        session
-            .query_unpaged(query, (value::CqlTimestamp(generation),))
-            .await
-            .unwrap();
-    }
-
-    // Populate test tables with given data.
-    async fn populate_test_db(session: &Session) {
-        let stream_generation = value::CqlTimestamp(GENERATION_NEW_MILLISECONDS);
-
-        for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
-            insert_generation_timestamp(session, *generation).await;
+            session
+                .query_unpaged(query, (value::CqlTimestamp(generation),))
+                .await
+                .unwrap();
         }
 
-        let query = new_distributed_system_query(
+        // Populate test tables with given data.
+        async fn populate_test_db(session: &Session) {
+            let stream_generation = value::CqlTimestamp(GENERATION_NEW_MILLISECONDS);
+
+            for generation in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
+                insert_generation_timestamp(session, *generation).await;
+            }
+
+            let query = new_distributed_system_query(
             format!(
                 "INSERT INTO {TEST_STREAM_TABLE}(time, range_end, streams) VALUES (?, -1, {{{TEST_STREAM_1}, {TEST_STREAM_2}}});"
             ),
             session,
-        )
-        .await
-        .unwrap();
-
-        session
-            .query_unpaged(query, (stream_generation,))
+            )
             .await
             .unwrap();
+
+            session
+                .query_unpaged(query, (stream_generation,))
+                .await
+                .unwrap();
+        }
+
+        // Create setup for tests.
+        pub(super) async fn setup() -> anyhow::Result<VnodeGenerationFetcher> {
+            let session = prepare_db(
+                &[
+                    construct_generation_table_query(),
+                    construct_stream_table_query(),
+                ],
+                1,
+            )
+            .await?
+            .0;
+            populate_test_db(&session).await;
+
+            let generation_fetcher = VnodeGenerationFetcher::test_new(&session);
+
+            Ok(generation_fetcher)
+        }
     }
 
-    // Create setup for tests.
-    async fn setup() -> anyhow::Result<VnodeGenerationFetcher> {
-        let session = prepare_db(
-            &[
-                construct_generation_table_query(),
-                construct_stream_table_query(),
-            ],
-            3,
-        )
-        .await?
-        .0;
-        populate_test_db(&session).await;
+    mod tablets_tests {
+        use super::*;
 
-        let generation_fetcher = VnodeGenerationFetcher::test_new(&session);
+        const TEST_KEYSPACE: &str = "test_tablets_ks";
+        const TEST_TABLE: &str = "test_tablets_table";
 
-        Ok(generation_fetcher)
+        impl TabletsGenerationFetcher {
+            // Constructor intended for testing purposes.
+            fn test_new(
+                session: &Arc<Session>,
+                keyspace: &str,
+                table: &str,
+            ) -> TabletsGenerationFetcher {
+                TabletsGenerationFetcher {
+                    timestamps_table_name: "cdc_timestamps".to_string(),
+                    streams_table_name: "cdc_streams".to_string(),
+                    keyspace_name: keyspace.to_string(),
+                    table_name: table.to_string(),
+                    session: Arc::clone(session),
+                }
+            }
+        }
+
+        pub(super) async fn insert_generation_timestamp(session: &Session, timestamp: i64) {
+            let query = new_distributed_system_query(
+                "INSERT INTO cdc_timestamps (keyspace_name, table_name, timestamp) VALUES (?, ?, ?);".to_string(), session)
+                .await
+                .unwrap();
+
+            session
+                .query_unpaged(
+                    query,
+                    (TEST_KEYSPACE, TEST_TABLE, value::CqlTimestamp(timestamp)),
+                )
+                .await
+                .unwrap();
+        }
+
+        // TabletsGenerationFetcher tests
+        pub(super) async fn setup() -> anyhow::Result<TabletsGenerationFetcher> {
+            let session = Arc::new(prepare_db(&[], 1).await?.0);
+            // Create CDC tables for tablets in the current keyspace
+            session
+                .query_unpaged(
+                    "CREATE TABLE IF NOT EXISTS cdc_timestamps (
+                keyspace_name text,
+                table_name text,
+                timestamp timestamp,
+                PRIMARY KEY ((keyspace_name, table_name), timestamp)
+            ) WITH CLUSTERING ORDER BY (timestamp DESC);",
+                    &[],
+                )
+                .await?;
+            session
+                .query_unpaged(
+                    "CREATE TABLE IF NOT EXISTS cdc_streams (
+                keyspace_name text,
+                table_name text,
+                timestamp timestamp,
+                stream_state tinyint,
+                stream_id blob,
+                PRIMARY KEY ((keyspace_name, table_name), timestamp, stream_state, stream_id)
+            ) WITH CLUSTERING ORDER BY (timestamp ASC, stream_state ASC, stream_id ASC);",
+                    &[],
+                )
+                .await?;
+
+            // Insert generations
+            for ts in &[GENERATION_NEW_MILLISECONDS, GENERATION_OLD_MILLISECONDS] {
+                insert_generation_timestamp(&session, *ts).await;
+            }
+
+            // Insert streams
+            for sid in &[TEST_STREAM_1, TEST_STREAM_2] {
+                let stream_id = hex::decode(sid.strip_prefix("0x").unwrap()).unwrap();
+                let query = new_distributed_system_query(
+                    "INSERT INTO cdc_streams (keyspace_name, table_name, timestamp, stream_state, stream_id) VALUES (?, ?, ?, ?, ?);".to_string(),
+                    &session,
+                )
+                .await
+                .unwrap();
+
+                for st in &[StreamState::Current, StreamState::Opened] {
+                    session
+                        .query_unpaged(
+                            query.clone(),
+                            (
+                                TEST_KEYSPACE,
+                                TEST_TABLE,
+                                value::CqlTimestamp(GENERATION_NEW_MILLISECONDS),
+                                *st as i8,
+                                stream_id.clone(),
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            Ok(TabletsGenerationFetcher::test_new(
+                &session,
+                TEST_KEYSPACE,
+                TEST_TABLE,
+            ))
+        }
     }
 
+    // helper function to setup and get appropriate GenerationFetcher and Session for tests
+    async fn setup(
+        tablets_enabled: bool,
+    ) -> anyhow::Result<(Arc<dyn GenerationFetcher>, Arc<Session>)> {
+        if tablets_enabled {
+            let fetcher = tablets_tests::setup().await?;
+            let session = Arc::clone(&fetcher.session);
+            Ok((Arc::new(fetcher), session))
+        } else {
+            let fetcher = vnode_tests::setup().await?;
+            let session = Arc::clone(&fetcher.session);
+            Ok((Arc::new(fetcher), session))
+        }
+    }
+
+    // helper function to insert a new generation
+    async fn insert_generation_timestamp(
+        session: &Session,
+        tablets_enabled: bool,
+        generation: i64,
+    ) {
+        if tablets_enabled {
+            tablets_tests::insert_generation_timestamp(session, generation).await;
+        } else {
+            vnode_tests::insert_generation_timestamp(session, generation).await;
+        }
+    }
+
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_fetch_all_generations() {
-        let fetcher = setup().await.unwrap();
+    async fn test_fetch_all_generations(#[case] tablets_enabled: bool) {
+        let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let correct_gen = vec![
             GenerationTimestamp {
@@ -593,9 +737,12 @@ mod tests {
         assert_eq!(gen, correct_gen);
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_get_generation_by_timestamp() {
-        let fetcher = setup().await.unwrap();
+    async fn test_get_generation_by_timestamp(#[case] tablets_enabled: bool) {
+        let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         // Input.
         let timestamps_ms = [
@@ -637,9 +784,12 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_get_next_generation() {
-        let fetcher = setup().await.unwrap();
+    async fn test_get_next_generation(#[case] tablets_enabled: bool) {
+        let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let gen = fetcher.fetch_all_generations().await.unwrap();
 
@@ -655,9 +805,12 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_get_next_generation_correct_order() {
-        let fetcher = setup().await.unwrap();
+    async fn test_get_next_generation_correct_order(#[case] tablets_enabled: bool) {
+        let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let gen_before_all_others = GenerationTimestamp {
             timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
@@ -672,9 +825,12 @@ mod tests {
         assert_eq!(gen_before_others_next.unwrap(), first_gen);
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_do_get_stream_ids() {
-        let fetcher = setup().await.unwrap();
+    async fn test_do_get_stream_ids(#[case] tablets_enabled: bool) {
+        let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let gen = GenerationTimestamp {
             timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
@@ -682,27 +838,26 @@ mod tests {
 
         let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
 
-        let correct_stream_ids: Vec<Vec<StreamID>> = [[TEST_STREAM_1, TEST_STREAM_2]]
-            .iter()
-            .map(|stream_vec| {
-                stream_vec
-                    .iter()
-                    .map(|stream| StreamID {
-                        id: hex::decode(stream.strip_prefix("0x").unwrap()).unwrap(),
-                    })
-                    .collect()
-            })
-            .collect();
+        let stream1 =
+            StreamID::new(hex::decode(TEST_STREAM_1.strip_prefix("0x").unwrap()).unwrap());
+        let stream2 =
+            StreamID::new(hex::decode(TEST_STREAM_2.strip_prefix("0x").unwrap()).unwrap());
 
-        assert_eq!(stream_ids, correct_stream_ids);
+        if tablets_enabled {
+            assert_eq!(stream_ids, vec![[stream1], [stream2]]);
+        } else {
+            assert_eq!(stream_ids, vec![vec![stream1, stream2]]);
+        }
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_get_generations_continuously() {
-        let fetcher = setup().await.unwrap();
-        let session = fetcher.session.clone();
+    async fn test_get_generations_continuously(#[case] tablets_enabled: bool) {
+        let (fetcher, session) = setup(tablets_enabled).await.unwrap();
 
-        let (mut generation_receiver, _future) = Arc::new(fetcher)
+        let (mut generation_receiver, _future) = fetcher
             .fetch_generations_continuously(
                 chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
                 time::Duration::from_millis(100),
@@ -728,7 +883,9 @@ mod tests {
             timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS + 100),
         };
 
-        insert_generation_timestamp(&session, GENERATION_NEW_MILLISECONDS + 100).await;
+        insert_generation_timestamp(&session, tablets_enabled, GENERATION_NEW_MILLISECONDS + 100)
+            .await;
+
         let generation = generation_receiver.recv().await.unwrap();
         assert_eq!(generation, new_gen);
     }
