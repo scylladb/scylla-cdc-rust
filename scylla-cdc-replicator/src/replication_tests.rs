@@ -9,7 +9,7 @@ mod tests {
     use scylla::value::CqlValue::{Boolean, Int, Text, UserDefinedType};
     use scylla::value::{CqlValue, Row};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
-    use scylla_cdc_test_utils::prepare_db;
+    use scylla_cdc_test_utils::{prepare_db, skip_if_not_supported};
     use std::sync::Arc;
 
     /// Tuple representing a column in the table that will be replicated.
@@ -466,9 +466,7 @@ mod tests {
             "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (3, 2, 1, false)",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -489,9 +487,7 @@ mod tests {
             "DELETE v1 FROM SIMPLE_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -516,9 +512,12 @@ mod tests {
             "UPDATE SIMPLE_UDT_TEST SET ut_col = null WHERE pk = 0 AND ck = 0",
         ];
 
-        test_replication_with_udt(table_schema, udt_schemas, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            table_schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
     #[rstest]
@@ -540,9 +539,7 @@ mod tests {
             "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (5, 6, {100: 100, 200: 200, 300: 300}, {400: true, 500: false})",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -563,9 +560,7 @@ mod tests {
             "DELETE v1 FROM MAPS_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -587,9 +582,7 @@ mod tests {
             "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {10} WHERE pk = 10 AND ck = 20",
             "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {1}, v1 = v1 + {2137: -2137} WHERE pk = 1 AND ck = 2",
         ];
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -613,9 +606,7 @@ mod tests {
             "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (-1, -2, 30, true)",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -636,9 +627,7 @@ mod tests {
             "INSERT INTO SET_TEST (pk, ck, v) VALUES (3, 4, {1, 1})",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -658,9 +647,7 @@ mod tests {
             "UPDATE SET_TEST SET v = {1, 2} WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -680,9 +667,7 @@ mod tests {
             "DELETE v FROM SET_TEST WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -704,9 +689,7 @@ mod tests {
             "UPDATE SET_TEST SET v = v - {10}, v = v + {200} WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -727,9 +710,7 @@ mod tests {
             "DELETE FROM PARTITION_DELETE WHERE pk = 0",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -755,9 +736,12 @@ mod tests {
             "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (3, 4, {int_val: 3, bool_val: true})",
         ];
 
-        test_replication_with_udt(schema, udt_schemas, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
     #[rstest]
@@ -778,9 +762,7 @@ mod tests {
             "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = 0 AND pk2 = 2",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -801,9 +783,7 @@ mod tests {
             "UPDATE LIST_ELEMENTS_UPDATE SET v = v - [1, 5] WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -829,9 +809,12 @@ mod tests {
             "UPDATE TEST_UDT_UPDATE SET v = null WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication_with_udt(schema, udt_schemas, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
     #[rstest]
@@ -851,9 +834,7 @@ mod tests {
             "UPDATE LIST_REPLACE SET v = [2, 4, 6, 8] WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -873,10 +854,12 @@ mod tests {
             "UPDATE COMPARE_TIME SET v2 = false WHERE pk = 1 AND ck = 2",
         ];
 
-        let (session, ks_src, ks_dst) =
-            test_replication_with_udt(schema.clone(), vec![], operations, tablets_enabled)
-                .await
-                .unwrap();
+        let (session, ks_src, ks_dst) = skip_if_not_supported!(test_replication_with_udt(
+            schema.clone(),
+            vec![],
+            operations,
+            tablets_enabled
+        ));
 
         // We update timestamps for v2 column in src.
         session
@@ -927,9 +910,7 @@ mod tests {
             "DELETE v4 FROM COMPARE_TIME WHERE pk = 4 AND CK = 4",
         ];
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
     #[rstest]
@@ -959,9 +940,12 @@ mod tests {
             "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication_with_udt(schema, udt_schemas, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
     #[rstest]
@@ -989,8 +973,6 @@ mod tests {
             "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2, ck3) > (3, 3, 3)",
         ]);
 
-        test_replication(schema, operations, tablets_enabled)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 }

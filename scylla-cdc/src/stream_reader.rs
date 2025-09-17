@@ -299,7 +299,9 @@ mod tests {
     use rstest::rstest;
     use scylla::errors::{ExecutionError, PrepareError, RequestAttemptError};
     use scylla::statement::unprepared::Statement;
-    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+    use scylla_cdc_test_utils::{
+        now, populate_simple_db_with_pk, prepare_simple_db, skip_if_not_supported, TEST_TABLE,
+    };
     use std::sync::atomic::AtomicIsize;
     use std::sync::atomic::Ordering::Relaxed;
     use tokio::sync::Mutex;
@@ -446,7 +448,7 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn check_fetch_cdc_with_multiple_stream_id(#[case] tablets_enabled: bool) {
-        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
+        let (shared_session, ks) = skip_if_not_supported!(prepare_simple_db(tablets_enabled));
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;
@@ -505,7 +507,7 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn check_fetch_cdc_with_one_stream_id(#[case] tablets_enabled: bool) {
-        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
+        let (shared_session, ks) = skip_if_not_supported!(prepare_simple_db(tablets_enabled));
 
         let partition_key = 0;
         populate_simple_db_with_pk(&shared_session, partition_key)
@@ -540,7 +542,7 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn check_set_upper_timestamp_in_fetch_cdc(#[case] tablets_enabled: bool) {
-        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
+        let (shared_session, ks) = skip_if_not_supported!(prepare_simple_db(tablets_enabled));
 
         let mut insert_before_upper_timestamp_query = Statement::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
@@ -593,7 +595,7 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn timeout_retry_test(#[case] tablets_enabled: bool) {
-        let (shared_session, ks) = prepare_simple_db(tablets_enabled).await.unwrap();
+        let (shared_session, ks) = skip_if_not_supported!(prepare_simple_db(tablets_enabled));
 
         let partition_key = 0;
         populate_simple_db_with_pk(&shared_session, partition_key)

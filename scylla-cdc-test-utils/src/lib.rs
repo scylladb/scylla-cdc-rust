@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -84,6 +85,17 @@ fn get_uri() -> String {
     std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
 }
 
+#[derive(Debug)]
+pub struct CdcWithTabletsNotSupported(pub String);
+
+impl fmt::Display for CdcWithTabletsNotSupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CDC with tablets is not supported: {}", self.0)
+    }
+}
+
+impl std::error::Error for CdcWithTabletsNotSupported {}
+
 pub async fn prepare_db(
     schema: &[String],
     replication_factor: u8,
@@ -93,10 +105,39 @@ pub async fn prepare_db(
     let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let shared_session = Arc::new(session);
 
-    let ks = create_test_db(&shared_session, schema, replication_factor, tablets_enabled).await?;
-    Ok((shared_session, ks))
+    match create_test_db(&shared_session, schema, replication_factor, tablets_enabled).await {
+        Ok(ks) => Ok((shared_session, ks)),
+        Err(e) => {
+            let msg = e.to_string();
+            if tablets_enabled && msg.contains("issue #16317") {
+                Err(anyhow::Error::new(CdcWithTabletsNotSupported(msg)))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 pub async fn prepare_simple_db(tablets_enabled: bool) -> anyhow::Result<(Arc<Session>, String)> {
     prepare_db(&[get_create_table_query()], 1, tablets_enabled).await
+}
+
+#[macro_export]
+macro_rules! skip_if_not_supported {
+    ($expr:expr) => {
+        match $expr.await {
+            Ok(val) => val,
+            Err(e) => {
+                if let Some(src) = e
+                    .root_cause()
+                    .downcast_ref::<scylla_cdc_test_utils::CdcWithTabletsNotSupported>()
+                {
+                    eprintln!("Skipping test: {}", src);
+                    return;
+                } else {
+                    panic!("failed: {e}");
+                }
+            }
+        }
+    };
 }

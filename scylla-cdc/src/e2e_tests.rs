@@ -19,7 +19,7 @@ mod tests {
     use scylla::serialize::SerializationError;
     use scylla::statement::prepared::PreparedStatement;
     use scylla::value::CqlValue;
-    use scylla_cdc_test_utils::{now, prepare_db};
+    use scylla_cdc_test_utils::{now, prepare_db, skip_if_not_supported};
     use tokio::sync::Mutex;
 
     use crate::checkpoints::TableBackedCheckpointSaver;
@@ -332,9 +332,8 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn e2e_test_small(#[case] tablets_enabled: bool) {
-        let mut test = Test::new("int_small_test", vec!["int"], tablets_enabled)
-            .await
-            .unwrap();
+        let mut test =
+            skip_if_not_supported!(Test::new("int_small_test", vec!["int"], tablets_enabled));
         let start = now();
 
         for i in 0..10 {
@@ -361,9 +360,7 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn e2e_test_int_pk(#[case] tablets_enabled: bool) {
-        let mut test = Test::new("int_test", vec!["int"], tablets_enabled)
-            .await
-            .unwrap();
+        let mut test = skip_if_not_supported!(Test::new("int_test", vec!["int"], tablets_enabled));
         let start = now();
 
         for i in 0..100 {
@@ -390,9 +387,11 @@ mod tests {
     #[case::tablets(true)]
     #[tokio::test]
     async fn e2e_test_int_string_pk(#[case] tablets_enabled: bool) {
-        let mut test = Test::new("int_string_test", vec!["int", "text"], tablets_enabled)
-            .await
-            .unwrap();
+        let mut test = skip_if_not_supported!(Test::new(
+            "int_string_test",
+            vec!["int", "text"],
+            tablets_enabled
+        ));
         let strings = ["blep".to_string(), "nghu".to_string(), "pkeee".to_string()];
         let start = now();
 
@@ -486,9 +485,7 @@ mod tests {
         let table_name = "test_saving_progress";
         let start = now();
 
-        let mut test = Test::new(table_name, vec!["int"], tablets_enabled)
-            .await
-            .unwrap();
+        let mut test = skip_if_not_supported!(Test::new(table_name, vec!["int"], tablets_enabled));
 
         let results = Arc::new(Mutex::new(HashMap::new()));
         let factory = Arc::new(TestConsumerFactory::new(Arc::clone(&results)));
