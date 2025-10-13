@@ -21,3 +21,4 @@ thiserror = "2.0"
 
 [dev-dependencies]
 scylla-cdc-test-utils = { path = "../scylla-cdc-test-utils" }
+rstest = "0.26.1"

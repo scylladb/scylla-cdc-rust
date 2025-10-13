@@ -129,7 +129,7 @@ mod tests {
         let start = now();
         let end = start + chrono::Duration::seconds(2);
 
-        let (shared_session, ks) = prepare_simple_db().await.unwrap();
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
 
         let partition_key_1 = 0;
         let partition_key_2 = 1;

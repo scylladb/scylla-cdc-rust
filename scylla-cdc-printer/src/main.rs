@@ -20,7 +20,7 @@ struct Args {
     table: String,
 
     /// Address of a node in source cluster
-    #[clap(short, long, action = clap::ArgAction::Set)]
+    #[clap(long, action = clap::ArgAction::Set)]
     hostname: String,
 
     /// Window size in seconds

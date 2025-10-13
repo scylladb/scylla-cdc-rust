@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -24,14 +25,33 @@ fn get_create_table_query() -> String {
     format!("CREATE TABLE IF NOT EXISTS {TEST_TABLE} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};")
 }
 
+fn get_create_keyspace_query(
+    keyspace: &str,
+    replication_factor: u8,
+    tablets_enabled: bool,
+) -> String {
+    let tablets_clause = if tablets_enabled {
+        " AND tablets={'enabled': true}"
+    } else {
+        " AND tablets={'enabled': false}"
+    };
+
+    format!(
+        "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH REPLICATION = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {replication_factor}}}{tablets_clause};"
+    )
+}
+
 pub async fn create_test_db(
     session: &Arc<Session>,
     schema: &[String],
     replication_factor: u8,
+    tablets_enabled: bool,
 ) -> anyhow::Result<String> {
     let ks = unique_name();
-    let mut create_keyspace_query = Statement::new(format!(
-        "CREATE KEYSPACE IF NOT EXISTS {ks} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': {replication_factor}}};"
+    let mut create_keyspace_query = Statement::new(get_create_keyspace_query(
+        &ks,
+        replication_factor,
+        tablets_enabled,
     ));
     create_keyspace_query.set_consistency(Consistency::All);
 
@@ -65,18 +85,59 @@ fn get_uri() -> String {
     std::env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string())
 }
 
+#[derive(Debug)]
+pub struct CdcWithTabletsNotSupported(pub String);
+
+impl fmt::Display for CdcWithTabletsNotSupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CDC with tablets is not supported: {}", self.0)
+    }
+}
+
+impl std::error::Error for CdcWithTabletsNotSupported {}
+
 pub async fn prepare_db(
     schema: &[String],
     replication_factor: u8,
+    tablets_enabled: bool,
 ) -> anyhow::Result<(Arc<Session>, String)> {
     let uri = get_uri();
     let session = SessionBuilder::new().known_node(uri).build().await.unwrap();
     let shared_session = Arc::new(session);
 
-    let ks = create_test_db(&shared_session, schema, replication_factor).await?;
-    Ok((shared_session, ks))
+    match create_test_db(&shared_session, schema, replication_factor, tablets_enabled).await {
+        Ok(ks) => Ok((shared_session, ks)),
+        Err(e) => {
+            let msg = e.to_string();
+            if tablets_enabled && msg.contains("issue #16317") {
+                Err(anyhow::Error::new(CdcWithTabletsNotSupported(msg)))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
-pub async fn prepare_simple_db() -> anyhow::Result<(Arc<Session>, String)> {
-    prepare_db(&[get_create_table_query()], 1).await
+pub async fn prepare_simple_db(tablets_enabled: bool) -> anyhow::Result<(Arc<Session>, String)> {
+    prepare_db(&[get_create_table_query()], 1, tablets_enabled).await
+}
+
+#[macro_export]
+macro_rules! skip_if_not_supported {
+    ($expr:expr) => {
+        match $expr.await {
+            Ok(val) => val,
+            Err(e) => {
+                if let Some(src) = e
+                    .root_cause()
+                    .downcast_ref::<scylla_cdc_test_utils::CdcWithTabletsNotSupported>()
+                {
+                    eprintln!("Skipping test: {}", src);
+                    return;
+                } else {
+                    panic!("failed: {e}");
+                }
+            }
+        }
+    };
 }

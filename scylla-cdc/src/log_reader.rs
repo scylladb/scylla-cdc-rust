@@ -27,7 +27,7 @@ use tracing::warn;
 use crate::cdc_types::GenerationTimestamp;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
-use crate::stream_generations::GenerationFetcher;
+use crate::stream_generations::get_generation_fetcher;
 use crate::stream_reader::{CDCReaderConfig, StreamReader};
 
 const SECOND_IN_MILLIS: i64 = 1_000;
@@ -58,6 +58,27 @@ impl CDCLogReader {
     pub fn stop(&mut self) {
         self.stop_at(chrono::Duration::MIN);
     }
+
+    /// Checks if the given keyspace uses tablets by querying system_schema.scylla_keyspaces.
+    async fn uses_tablets(session: &Session, keyspace: &str) -> anyhow::Result<bool> {
+        let query =
+            "SELECT initial_tablets FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?"
+                .to_string();
+        // the query may fail on old scylla versions that don't have this table. in this case return
+        // false because it doesn't support tablets.
+        let result = match session.query_unpaged(query, (keyspace,)).await {
+            Ok(r) => r,
+            Err(_) => return Ok(false),
+        };
+        let rows_result = result.into_rows_result()?;
+        let value = rows_result.maybe_first_row::<(Option<i32>,)>()?;
+        if let Some((tablets_val,)) = value {
+            if tablets_val.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 struct CDCReaderWorker {
@@ -69,11 +90,17 @@ struct CDCReaderWorker {
     end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
     consumer_factory: Arc<dyn ConsumerFactory>,
     config: CDCReaderConfig,
+    uses_tablets: bool,
 }
 
 impl CDCReaderWorker {
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        let fetcher = Arc::new(GenerationFetcher::new(&self.session));
+        let fetcher = get_generation_fetcher(
+            &self.session,
+            &self.keyspace,
+            &self.table_name,
+            self.uses_tablets,
+        );
         let (mut generation_receiver, _future_handle) = fetcher
             .clone()
             .fetch_generations_continuously(self.config.lower_timestamp, self.config.sleep_interval)
@@ -455,6 +482,8 @@ impl CDCLogReaderBuilder {
             }
         }
 
+        let uses_tablets = CDCLogReader::uses_tablets(&session, &keyspace).await?;
+
         let config = CDCReaderConfig {
             lower_timestamp: start_timestamp,
             window_size: self.window_size,
@@ -475,6 +504,7 @@ impl CDCLogReaderBuilder {
             end_timestamp_receiver,
             consumer_factory,
             config,
+            uses_tablets,
         };
 
         let (fut, handle) = async move { cdc_reader_worker.run().await }.remote_handle();
@@ -543,7 +573,7 @@ mod tests {
             next_id: Arc::new(AtomicUsize::new(0)),
             condition,
         });
-        let (session, ks) = prepare_simple_db().await.unwrap();
+        let (session, ks) = prepare_simple_db(false).await.unwrap();
         let start = now();
         for i in 0..pk_count {
             populate_simple_db_with_pk(&session, i).await.unwrap();

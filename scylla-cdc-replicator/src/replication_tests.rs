@@ -4,11 +4,12 @@ mod tests {
     use anyhow::anyhow;
     use futures_util::{FutureExt, StreamExt, TryStreamExt};
     use itertools::Itertools;
+    use rstest::rstest;
     use scylla::client::session::Session;
     use scylla::value::CqlValue::{Boolean, Int, Text, UserDefinedType};
     use scylla::value::{CqlValue, Row};
     use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
-    use scylla_cdc_test_utils::prepare_db;
+    use scylla_cdc_test_utils::{prepare_db, skip_if_not_supported};
     use std::sync::Arc;
 
     /// Tuple representing a column in the table that will be replicated.
@@ -295,8 +296,9 @@ mod tests {
     async fn test_replication(
         schema: TestTableSchema<'_>,
         operations: Vec<TestOperation<'_>>,
+        tablets_enabled: bool,
     ) -> anyhow::Result<()> {
-        test_replication_with_udt(schema, vec![], operations).await?;
+        test_replication_with_udt(schema, vec![], operations, tablets_enabled).await?;
 
         Ok(())
     }
@@ -307,6 +309,7 @@ mod tests {
         table_schema: TestTableSchema<'_>,
         udt_schemas: Vec<TestUDTSchema<'_>>,
         operations: Vec<TestOperation<'_>>,
+        tablets_enabled: bool,
     ) -> anyhow::Result<(Arc<Session>, String, String)> {
         let mut schema_queries = get_udt_queries(udt_schemas);
         let create_dst_table_query = get_table_create_query(&table_schema);
@@ -315,9 +318,9 @@ mod tests {
 
         let len = schema_queries.len();
         schema_queries.push(create_src_table_query);
-        let (session, ks_src) = prepare_db(&schema_queries, 1).await?;
+        let (session, ks_src) = prepare_db(&schema_queries, 1, tablets_enabled).await?;
         schema_queries[len] = create_dst_table_query;
-        let (_, ks_dst) = prepare_db(&schema_queries, 1).await?;
+        let (_, ks_dst) = prepare_db(&schema_queries, 1, tablets_enabled).await?;
         session.refresh_metadata().await?;
         let mut last_read = (0, 0);
 
@@ -446,8 +449,11 @@ mod tests {
         assert!(!is_equal);
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn simple_insert_test() {
+    async fn simple_insert_test(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "SIMPLE_INSERT".to_string(),
             partition_key: vec![("pk", "int")],
@@ -460,11 +466,14 @@ mod tests {
             "INSERT INTO SIMPLE_INSERT (pk, ck, v1, v2) VALUES (3, 2, 1, false)",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn simple_update_test() {
+    async fn simple_update_test(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "SIMPLE_UPDATE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -478,11 +487,14 @@ mod tests {
             "DELETE v1 FROM SIMPLE_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn simple_frozen_udt_test() {
+    async fn simple_frozen_udt_test(#[case] tablets_enabled: bool) {
         let table_schema = TestTableSchema {
             name: "SIMPLE_UDT_TEST".to_string(),
             partition_key: vec![("pk", "int")],
@@ -500,13 +512,19 @@ mod tests {
             "UPDATE SIMPLE_UDT_TEST SET ut_col = null WHERE pk = 0 AND ck = 0",
         ];
 
-        test_replication_with_udt(table_schema, udt_schemas, operations)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            table_schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_map_insert() {
+    async fn test_map_insert(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "MAPS_INSERT".to_string(),
             partition_key: vec![("pk", "int")],
@@ -521,11 +539,14 @@ mod tests {
             "INSERT INTO MAPS_INSERT (pk, ck, v1, v2) VALUES (5, 6, {100: 100, 200: 200, 300: 300}, {400: true, 500: false})",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_map_update() {
+    async fn test_map_update(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "MAPS_UPDATE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -539,11 +560,14 @@ mod tests {
             "DELETE v1 FROM MAPS_UPDATE WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_map_elements_update() {
+    async fn test_map_elements_update(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "MAP_ELEMENTS_UPDATE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -558,11 +582,14 @@ mod tests {
             "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {10} WHERE pk = 10 AND ck = 20",
             "UPDATE MAP_ELEMENTS_UPDATE SET v1 = v1 - {1}, v1 = v1 + {2137: -2137} WHERE pk = 1 AND ck = 2",
         ];
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_row_delete() {
+    async fn test_row_delete(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "ROW_DELETE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -579,11 +606,14 @@ mod tests {
             "INSERT INTO ROW_DELETE (pk, ck, v1, v2) VALUES (-1, -2, 30, true)",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_set_insert() {
+    async fn test_set_insert(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "SET_TEST".to_string(),
             partition_key: vec![("pk", "int")],
@@ -597,11 +627,14 @@ mod tests {
             "INSERT INTO SET_TEST (pk, ck, v) VALUES (3, 4, {1, 1})",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_set_overwrite() {
+    async fn test_set_overwrite(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "SET_TEST".to_string(),
             partition_key: vec![("pk", "int")],
@@ -614,11 +647,14 @@ mod tests {
             "UPDATE SET_TEST SET v = {1, 2} WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_set_delete() {
+    async fn test_set_delete(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "SET_TEST".to_string(),
             partition_key: vec![("pk", "int")],
@@ -631,11 +667,14 @@ mod tests {
             "DELETE v FROM SET_TEST WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_set_update() {
+    async fn test_set_update(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "SET_TEST".to_string(),
             partition_key: vec![("pk", "int")],
@@ -650,11 +689,14 @@ mod tests {
             "UPDATE SET_TEST SET v = v - {10}, v = v + {200} WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_partition_delete() {
+    async fn test_partition_delete(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "PARTITION_DELETE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -668,11 +710,14 @@ mod tests {
             "DELETE FROM PARTITION_DELETE WHERE pk = 0",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_udt_insert() {
+    async fn test_udt_insert(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "TEST_UDT_INSERT".to_string(),
             partition_key: vec![("pk", "int")],
@@ -691,13 +736,19 @@ mod tests {
             "INSERT INTO TEST_UDT_INSERT (pk, ck, v) VALUES (3, 4, {int_val: 3, bool_val: true})",
         ];
 
-        test_replication_with_udt(schema, udt_schemas, operations)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_partition_delete_with_multiple_pk() {
+    async fn test_partition_delete_with_multiple_pk(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "PARTITION_DELETE_MULT_PK".to_string(),
             partition_key: vec![("pk1", "int"), ("pk2", "int")],
@@ -711,11 +762,14 @@ mod tests {
             "DELETE FROM PARTITION_DELETE_MULT_PK WHERE pk1 = 0 AND pk2 = 2",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_list_update() {
+    async fn test_list_update(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "LIST_ELEMENTS_UPDATE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -729,11 +783,14 @@ mod tests {
             "UPDATE LIST_ELEMENTS_UPDATE SET v = v - [1, 5] WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_udt_update() {
+    async fn test_udt_update(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "TEST_UDT_UPDATE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -752,13 +809,19 @@ mod tests {
             "UPDATE TEST_UDT_UPDATE SET v = null WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication_with_udt(schema, udt_schemas, operations)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_list_replace() {
+    async fn test_list_replace(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "LIST_REPLACE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -771,11 +834,14 @@ mod tests {
             "UPDATE LIST_REPLACE SET v = [2, 4, 6, 8] WHERE pk = 1 AND ck = 2",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_checking_timestamps() {
+    async fn test_checking_timestamps(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "COMPARE_TIME".to_string(),
             partition_key: vec![("pk", "int")],
@@ -788,10 +854,12 @@ mod tests {
             "UPDATE COMPARE_TIME SET v2 = false WHERE pk = 1 AND ck = 2",
         ];
 
-        let (session, ks_src, ks_dst) =
-            test_replication_with_udt(schema.clone(), vec![], operations)
-                .await
-                .unwrap();
+        let (session, ks_src, ks_dst) = skip_if_not_supported!(test_replication_with_udt(
+            schema.clone(),
+            vec![],
+            operations,
+            tablets_enabled
+        ));
 
         // We update timestamps for v2 column in src.
         session
@@ -810,8 +878,11 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_compare_time_for_complicated_types() {
+    async fn test_compare_time_for_complicated_types(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "COMPARE_TIME".to_string(),
             partition_key: vec![("pk", "int")],
@@ -839,11 +910,14 @@ mod tests {
             "DELETE v4 FROM COMPARE_TIME WHERE pk = 4 AND CK = 4",
         ];
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_udt_fields_update() {
+    async fn test_udt_fields_update(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "TEST_UDT_ELEMENTS_UPDATE".to_string(),
             partition_key: vec![("pk", "int")],
@@ -866,13 +940,19 @@ mod tests {
             "UPDATE TEST_UDT_ELEMENTS_UPDATE SET v.int_val = null WHERE pk = 0 AND ck = 1",
         ];
 
-        test_replication_with_udt(schema, udt_schemas, operations)
-            .await
-            .unwrap();
+        skip_if_not_supported!(test_replication_with_udt(
+            schema,
+            udt_schemas,
+            operations,
+            tablets_enabled
+        ));
     }
 
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
     #[tokio::test]
-    async fn test_range_delete() {
+    async fn test_range_delete(#[case] tablets_enabled: bool) {
         let schema = TestTableSchema {
             name: "RANGE_DELETE".to_string(),
             partition_key: vec![("pk1", "int"), ("pk2", "int")],
@@ -893,6 +973,6 @@ mod tests {
             "DELETE FROM RANGE_DELETE WHERE pk1 = 0 AND pk2 = 0 AND (ck1, ck2, ck3) > (3, 3, 3)",
         ]);
 
-        test_replication(schema, operations).await.unwrap();
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
 }
