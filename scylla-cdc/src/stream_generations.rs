@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use futures::stream::StreamExt;
 use futures::FutureExt;
-use futures::{future::RemoteHandle, TryStreamExt};
+use futures::stream::StreamExt;
+use futures::{TryStreamExt, future::RemoteHandle};
 use scylla::client::session::Session;
-use scylla::statement::unprepared::Statement;
 use scylla::statement::Consistency;
+use scylla::statement::unprepared::Statement;
 use scylla::value;
 use std::sync::Arc;
 use std::time;
@@ -70,7 +70,7 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
                                     }
                                 }
                             }
-                        }
+                        };
                     }
                     _ => {
                         warn!("Failed to fetch generation by timestamp");
@@ -741,7 +741,7 @@ mod tests {
     async fn test_fetch_all_generations(#[case] tablets_enabled: bool) {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
-        let correct_gen = vec![
+        let correct_generations = vec![
             GenerationTimestamp {
                 timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
             },
@@ -750,9 +750,9 @@ mod tests {
             },
         ];
 
-        let gen = fetcher.fetch_all_generations().await.unwrap();
+        let generations = fetcher.fetch_all_generations().await.unwrap();
 
-        assert_eq!(gen, correct_gen);
+        assert_eq!(generations, correct_generations);
     }
 
     #[rstest]
@@ -788,13 +788,13 @@ mod tests {
         for i in 0..timestamps_ms.len() {
             let timestamp = chrono::Duration::milliseconds(timestamps_ms[i]);
 
-            let gen = fetcher
+            let generations = fetcher
                 .fetch_generation_by_timestamp(&timestamp)
                 .await
                 .unwrap();
 
             assert_eq!(
-                gen,
+                generations,
                 correct_generations[i].map(|gen_ms| GenerationTimestamp {
                     timestamp: chrono::Duration::milliseconds(gen_ms)
                 }),
@@ -809,12 +809,18 @@ mod tests {
     async fn test_get_next_generation(#[case] tablets_enabled: bool) {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
-        let gen = fetcher.fetch_all_generations().await.unwrap();
+        let generations = fetcher.fetch_all_generations().await.unwrap();
 
-        let gen_new_next = fetcher.fetch_next_generation(&gen[0]).await.unwrap();
+        let gen_new_next = fetcher
+            .fetch_next_generation(&generations[0])
+            .await
+            .unwrap();
         assert!(gen_new_next.is_none());
 
-        let gen_old_next = fetcher.fetch_next_generation(&gen[1]).await.unwrap();
+        let gen_old_next = fetcher
+            .fetch_next_generation(&generations[1])
+            .await
+            .unwrap();
         assert_eq!(
             gen_old_next.unwrap(),
             GenerationTimestamp {
@@ -850,11 +856,11 @@ mod tests {
     async fn test_do_get_stream_ids(#[case] tablets_enabled: bool) {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
-        let gen = GenerationTimestamp {
+        let generation = GenerationTimestamp {
             timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
         };
 
-        let stream_ids = fetcher.fetch_stream_ids(&gen).await.unwrap();
+        let stream_ids = fetcher.fetch_stream_ids(&generation).await.unwrap();
 
         let stream1 =
             StreamID::new(hex::decode(TEST_STREAM_1.strip_prefix("0x").unwrap()).unwrap());

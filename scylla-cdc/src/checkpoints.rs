@@ -2,8 +2,8 @@
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 use anyhow;
 use async_trait::async_trait;
-use futures::future::RemoteHandle;
 use futures::FutureExt;
+use futures::future::RemoteHandle;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value;
@@ -220,7 +220,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
             .await?
             .into_rows_result()?
             .maybe_first_row::<(value::CqlTimestamp,)>()?
-            .map(|t| chrono::Duration::milliseconds(t.0 .0)))
+            .map(|t| chrono::Duration::milliseconds(t.0.0)))
     }
 }
 
@@ -259,9 +259,9 @@ mod tests {
             .rows_stream::<(StreamID, GenerationTimestamp, value::CqlTimestamp)>()
             .unwrap()
             .map(|res| {
-                res.map(|(id, gen, time)| Checkpoint {
+                res.map(|(id, generation, time)| Checkpoint {
                     stream_id: id,
-                    generation: gen,
+                    generation,
                     timestamp: Duration::from_millis(time.0 as u64),
                 })
             })
