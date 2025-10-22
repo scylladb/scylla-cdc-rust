@@ -115,7 +115,7 @@ mod tests {
     use std::time;
 
     use scylla_cdc::log_reader::CDCLogReaderBuilder;
-    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+    use scylla_cdc_test_utils::{TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db};
 
     use super::*;
 

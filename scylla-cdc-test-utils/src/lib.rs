@@ -1,11 +1,11 @@
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
-use scylla::statement::unprepared::Statement;
 use scylla::statement::Consistency;
+use scylla::statement::unprepared::Statement;
 
 pub const TEST_TABLE: &str = "t";
 static UNIQUE_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -22,7 +22,9 @@ pub fn unique_name() -> String {
 }
 
 fn get_create_table_query() -> String {
-    format!("CREATE TABLE IF NOT EXISTS {TEST_TABLE} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};")
+    format!(
+        "CREATE TABLE IF NOT EXISTS {TEST_TABLE} (pk int, t int, v text, s text, PRIMARY KEY (pk, t)) WITH cdc = {{'enabled':true}};"
+    )
 }
 
 fn get_create_keyspace_query(

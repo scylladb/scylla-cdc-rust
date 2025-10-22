@@ -18,7 +18,7 @@ use tokio::time::sleep;
 use tracing::{enabled, warn};
 
 use crate::cdc_types::{GenerationTimestamp, StreamID};
-use crate::checkpoints::{start_saving_checkpoints, CDCCheckpointSaver, Checkpoint};
+use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 
 const BASIC_TIMEOUT_SLEEP_MS: u128 = 10;
@@ -300,7 +300,7 @@ mod tests {
     use scylla::errors::{ExecutionError, PrepareError, RequestAttemptError};
     use scylla::statement::unprepared::Statement;
     use scylla_cdc_test_utils::{
-        now, populate_simple_db_with_pk, prepare_simple_db, skip_if_not_supported, TEST_TABLE,
+        TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db, skip_if_not_supported,
     };
     use std::sync::atomic::AtomicIsize;
     use std::sync::atomic::Ordering::Relaxed;

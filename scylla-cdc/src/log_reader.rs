@@ -18,9 +18,9 @@ use std::time;
 use std::time::SystemTime;
 
 use anyhow;
+use futures::FutureExt;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
-use futures::FutureExt;
 use scylla::client::session::Session;
 use tracing::warn;
 
@@ -205,7 +205,9 @@ impl CDCReaderWorker {
                         }
                     } else {
                         // Current generation's next generation is not available
-                        warn!("Next generation is not available, some rows in the CDC log table may be unread.");
+                        warn!(
+                            "Next generation is not available, some rows in the CDC log table may be unread."
+                        );
                         return Ok(());
                     }
                 } else {
@@ -524,16 +526,16 @@ impl Default for CDCLogReaderBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::consumer::{CDCRow, Consumer, ConsumerFactory};
     use crate::log_reader::CDCLogReaderBuilder;
     use anyhow::anyhow;
     use async_trait::async_trait;
-    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+    use scylla_cdc_test_utils::{TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db};
 
     struct ErrorConsumer {
         id: usize,
