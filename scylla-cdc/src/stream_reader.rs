@@ -171,10 +171,10 @@ impl StreamReader {
             )
             .await?;
 
-            if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref() {
-                if window_end >= *timestamp_to_stop {
-                    break;
-                }
+            if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref()
+                && window_end >= *timestamp_to_stop
+            {
+                break;
             }
 
             window_begin = window_end;
