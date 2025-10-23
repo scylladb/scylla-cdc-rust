@@ -1,9 +1,9 @@
 //! A module containing types related to CDC internal structure.
 use scylla::deserialize::value::DeserializeValue;
 use scylla::frame::response::result::ColumnType;
+use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::{CellWriter, WrittenCellProof};
-use scylla::serialize::SerializationError;
 use scylla::value::CqlTimestamp;
 use std::fmt;
 

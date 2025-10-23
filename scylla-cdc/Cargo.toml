@@ -1,7 +1,7 @@
 [package]
 name = "scylla-cdc"
 version = "0.4.1"
-edition = "2021"
+edition = "2024"
 description = "Library for consuming ScyllaDB CDC log for Rust"
 repository = "https://github.com/scylladb/scylla-cdc-rust"
 readme = "../README.md"

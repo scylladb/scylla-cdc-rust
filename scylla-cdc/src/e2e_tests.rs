@@ -7,16 +7,16 @@ mod tests {
     use std::sync::Arc;
     use std::time;
 
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use async_trait::async_trait;
     use futures::future::RemoteHandle;
-    use itertools::{repeat_n, Itertools};
+    use itertools::{Itertools, repeat_n};
     use rstest::rstest;
     use scylla::client::session::Session;
     use scylla::frame::response::result::ColumnType;
+    use scylla::serialize::SerializationError;
     use scylla::serialize::value::SerializeValue;
     use scylla::serialize::writers::{CellWriter, WrittenCellProof};
-    use scylla::serialize::SerializationError;
     use scylla::statement::prepared::PreparedStatement;
     use scylla::value::CqlValue;
     use scylla_cdc_test_utils::{now, prepare_db, skip_if_not_supported};
@@ -173,9 +173,11 @@ mod tests {
             .join(" AND ");
 
         (
-            format!("CREATE TABLE {table_name} ({pk_definitions}, ck int, v int, primary key (({primary_key_tuple}), ck)) WITH cdc = {{'enabled' : true}}"),
+            format!(
+                "CREATE TABLE {table_name} ({pk_definitions}, ck int, v int, primary key (({primary_key_tuple}), ck)) WITH cdc = {{'enabled' : true}}"
+            ),
             format!("INSERT INTO {table_name} (v, {primary_key_tuple}, ck) VALUES ({binds}, ?, ?)"),
-            format!("UPDATE {table_name} SET v = ? WHERE {pk_conditions} AND ck = ?")
+            format!("UPDATE {table_name} SET v = ? WHERE {pk_conditions} AND ck = ?"),
         )
     }
 

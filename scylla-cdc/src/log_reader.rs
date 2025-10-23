@@ -18,9 +18,9 @@ use std::time;
 use std::time::SystemTime;
 
 use anyhow;
+use futures::FutureExt;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
-use futures::FutureExt;
 use scylla::client::session::Session;
 use tracing::warn;
 
@@ -72,10 +72,10 @@ impl CDCLogReader {
         };
         let rows_result = result.into_rows_result()?;
         let value = rows_result.maybe_first_row::<(Option<i32>,)>()?;
-        if let Some((tablets_val,)) = value {
-            if tablets_val.is_some() {
-                return Ok(true);
-            }
+        if let Some((tablets_val,)) = value
+            && tablets_val.is_some()
+        {
+            return Ok(true);
         }
         Ok(false)
     }
@@ -205,7 +205,9 @@ impl CDCReaderWorker {
                         }
                     } else {
                         // Current generation's next generation is not available
-                        warn!("Next generation is not available, some rows in the CDC log table may be unread.");
+                        warn!(
+                            "Next generation is not available, some rows in the CDC log table may be unread."
+                        );
                         return Ok(());
                     }
                 } else {
@@ -468,8 +470,8 @@ impl CDCLogReaderBuilder {
         let readers = vec![];
 
         let mut start_timestamp = self.start_timestamp;
-        if self.should_load_progress {
-            if let Some(generation) = self
+        if self.should_load_progress
+            && let Some(generation) = self
                 .checkpoint_saver
                 .as_ref()
                 .ok_or_else(|| {
@@ -477,9 +479,8 @@ impl CDCLogReaderBuilder {
                 })?
                 .load_last_generation()
                 .await?
-            {
-                start_timestamp = std::cmp::max(generation.timestamp, start_timestamp);
-            }
+        {
+            start_timestamp = std::cmp::max(generation.timestamp, start_timestamp);
         }
 
         let uses_tablets = CDCLogReader::uses_tablets(&session, &keyspace).await?;
@@ -524,16 +525,16 @@ impl Default for CDCLogReaderBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::consumer::{CDCRow, Consumer, ConsumerFactory};
     use crate::log_reader::CDCLogReaderBuilder;
     use anyhow::anyhow;
     use async_trait::async_trait;
-    use scylla_cdc_test_utils::{now, populate_simple_db_with_pk, prepare_simple_db, TEST_TABLE};
+    use scylla_cdc_test_utils::{TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db};
 
     struct ErrorConsumer {
         id: usize,
