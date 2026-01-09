@@ -43,6 +43,22 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
         generation: &GenerationTimestamp,
     ) -> anyhow::Result<Vec<Vec<StreamID>>>;
 
+    /// Fetches all generations until at least one is found, then returns the latest one.
+    async fn get_latest_generation(&self, sleep_interval: time::Duration) -> GenerationTimestamp {
+        loop {
+            match self.fetch_all_generations().await {
+                Ok(vectors) => match vectors.into_iter().next_back() {
+                    None => sleep(sleep_interval).await,
+                    Some(generation) => break generation,
+                },
+                Err(err) => {
+                    warn!("Failed to fetch all generations: {err}");
+                    sleep(sleep_interval).await
+                }
+            }
+        }
+    }
+
     /// Continuously monitors and fetches new generations as they become available.
     /// Returns a receiver for new generations and a handle to the background task.
     async fn fetch_generations_continuously(
@@ -57,23 +73,10 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
                 match self.fetch_generation_by_timestamp(&start_timestamp).await {
                     Ok(Some(generation)) => break generation,
                     Ok(None) => {
-                        break {
-                            loop {
-                                match self.fetch_all_generations().await {
-                                    Ok(vectors) => match vectors.last() {
-                                        None => sleep(sleep_interval).await,
-                                        Some(generation) => break generation.clone(),
-                                    },
-                                    _ => {
-                                        warn!("Failed to fetch all generations");
-                                        sleep(sleep_interval).await
-                                    }
-                                }
-                            }
-                        };
+                        break self.get_latest_generation(sleep_interval).await;
                     }
-                    _ => {
-                        warn!("Failed to fetch generation by timestamp");
+                    Err(err) => {
+                        warn!("Failed to fetch generation by timestamp: {err}");
                         sleep(sleep_interval).await
                     }
                 }
@@ -87,8 +90,8 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
                     match self.fetch_next_generation(&generation).await {
                         Ok(Some(generation)) => break generation,
                         Ok(None) => sleep(sleep_interval).await,
-                        _ => {
-                            warn!("Failed to fetch next generation");
+                        Err(err) => {
+                            warn!("Failed to fetch next generation: {err}");
                             sleep(sleep_interval).await
                         }
                     }
