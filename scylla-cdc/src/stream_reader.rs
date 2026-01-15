@@ -7,7 +7,9 @@ use std::time::{self, Duration};
 use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::client::session::Session;
-use scylla::errors::{DbError, ExecutionError, PrepareError, RequestAttemptError};
+use scylla::errors::{
+    ConnectionPoolError, DbError, ExecutionError, PrepareError, RequestAttemptError,
+};
 use scylla::response::query_result::QueryResult;
 use scylla::response::{PagingState, PagingStateResponse};
 use scylla::statement::prepared::PreparedStatement;
@@ -69,6 +71,73 @@ impl StreamSession for Session {
             .await?;
 
         Ok((query_result, paging_state_response))
+    }
+}
+
+/// The attempt here is to determine whether the error is transient,
+/// by looking at the error types. Errors that we consider transient are:
+///   - any kind of error to the network connection to the database
+///     (BrokenConnectionError / ConnectionPoolError / RequestTimeout)
+///   - any database error that suggest that while request is correct, database cannot handle it now
+///     (Overloaded / RateLimitReached / Unavailable / ...)
+///   - driver side problems that will likely be solved in the near future
+///     (UnableToAllocStreamId)
+fn is_transient_error(error: &ExecutionError) -> bool {
+    #[deny(clippy::wildcard_enum_match_arm)]
+    match error {
+        ExecutionError::RequestTimeout(_) => true,
+        #[deny(clippy::wildcard_enum_match_arm)]
+        ExecutionError::LastAttemptError(error) => match error {
+            RequestAttemptError::BrokenConnectionError(_)
+            | RequestAttemptError::UnableToAllocStreamId => true,
+            #[deny(clippy::wildcard_enum_match_arm)]
+            RequestAttemptError::DbError(db_error, _) => match db_error {
+                DbError::Unavailable { .. }
+                | DbError::ReadTimeout { .. }
+                | DbError::Overloaded
+                | DbError::IsBootstrapping
+                | DbError::RateLimitReached { .. } => true,
+                DbError::SyntaxError
+                | DbError::Invalid
+                | DbError::AlreadyExists { .. }
+                | DbError::FunctionFailure { .. }
+                | DbError::AuthenticationError
+                | DbError::Unauthorized
+                | DbError::ConfigError
+                | DbError::TruncateError
+                | DbError::WriteTimeout { .. }
+                | DbError::ReadFailure { .. }
+                | DbError::WriteFailure { .. }
+                | DbError::Unprepared { .. }
+                | DbError::ServerError
+                | DbError::ProtocolError
+                | DbError::Other(_) => false,
+                _ => unreachable!(),
+            },
+            RequestAttemptError::SerializationError(_)
+            | RequestAttemptError::CqlRequestSerialization(_)
+            | RequestAttemptError::BodyExtensionsParseError(_)
+            | RequestAttemptError::CqlResultParseError(_)
+            | RequestAttemptError::CqlErrorParseError(_)
+            | RequestAttemptError::UnexpectedResponse(_)
+            | RequestAttemptError::RepreparedIdChanged { .. }
+            | RequestAttemptError::RepreparedIdMissingInBatch
+            | RequestAttemptError::NonfinishedPagingState => false,
+            _ => unreachable!(),
+        },
+        #[deny(clippy::wildcard_enum_match_arm)]
+        ExecutionError::ConnectionPoolError(error) => match error {
+            ConnectionPoolError::NodeDisabledByHostFilter => false,
+            ConnectionPoolError::Broken { .. } | ConnectionPoolError::Initializing => true,
+            _ => unreachable!(),
+        },
+        ExecutionError::BadQuery(_)
+        | ExecutionError::EmptyPlan
+        | ExecutionError::PrepareError(_)
+        | ExecutionError::UseKeyspaceError(_)
+        | ExecutionError::SchemaAgreementError(_)
+        | ExecutionError::MetadataError(_) => false,
+        _ => unreachable!(),
     }
 }
 
@@ -251,35 +320,37 @@ impl StreamReader {
                         PagingStateResponse::NoMorePages => break,
                     }
                 }
-                Err(
-                    err @ ExecutionError::RequestTimeout(_)
-                    | err @ ExecutionError::LastAttemptError(RequestAttemptError::DbError(
-                        DbError::ReadTimeout { .. },
-                        _,
-                    )),
-                ) => {
-                    self.print_timeout_warning(
-                        &window_begin,
-                        &window_end,
-                        sleep_after_timeout,
-                        page_no,
-                        anyhow::Error::new(err),
-                    )
-                    .await;
-                    // Waiting here is a bit suboptimal, as if this happens after generation change,
-                    // we will still sleep, slowing down the process of opening streams for new generation.
-                    // Those streams will be opened only after all instances of fetch_cdc return.
-                    sleep(sleep_after_timeout).await;
-                    sleep_after_timeout *= TIMEOUT_FACTOR;
-                    if sleep_after_timeout >= self.config.sleep_interval {
-                        sleep_after_timeout = self.config.sleep_interval;
-                    }
+                Err(err) => {
+                    // The assumption here is we want to have the CDC running when we encounter some transient errors.
+                    // The rest of the logic will assume that we will still collect all data, even if we lag behind.
+                    // Why not use the retry policy here? The rust driver does not support async retry policies,
+                    // meaning we cannot delay the next retry when using the policy.
+                    // On the other hand, we would prefer to have (exponential) backoff here, to avoid overloading the database,
+                    // especially this CDC is the part of the problem (remember that we may have a few hundred streamIDs - and as a result
+                    // create a few hundred requests to the database at a single moment).
+                    if is_transient_error(&err) {
+                        self.print_timeout_warning(
+                            &window_begin,
+                            &window_end,
+                            sleep_after_timeout,
+                            page_no,
+                            anyhow::Error::new(err),
+                        )
+                        .await;
+                        // Waiting here is a bit suboptimal, as if this happens after generation change,
+                        // we will still sleep, slowing down the process of opening streams for new generation.
+                        // Those streams will be opened only after all instances of fetch_cdc return.
+                        sleep(sleep_after_timeout).await;
+                        sleep_after_timeout *= TIMEOUT_FACTOR;
+                        if sleep_after_timeout >= self.config.sleep_interval {
+                            sleep_after_timeout = self.config.sleep_interval;
+                        }
 
-                    next_state = state_clone;
-                }
-                Err(e) => {
-                    return Err(anyhow::Error::new(e)
-                        .context("Session returned an error while fetching CDC rows."));
+                        next_state = state_clone;
+                    } else {
+                        return Err(anyhow::Error::new(err)
+                            .context("Session returned an error while fetching CDC rows."));
+                    }
                 }
             }
         }
