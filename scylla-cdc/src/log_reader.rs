@@ -94,7 +94,15 @@ struct CDCReaderWorker {
 }
 
 impl CDCReaderWorker {
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    /// Spawns the CDC log reader worker for every stream for the given keyspace and table, configured in this struct.
+    /// It updates the stream readers upon a new generation being available.
+    ///
+    /// Finishes when we encounter an error or when the end timestamp is reached. The timestamp can be updated,
+    /// with the tokio sender inside [`CDCLogReader`](self::CDCLogReader),
+    /// which was created alongside this worker inside a [`CDCLogReaderBuilder`](self::CDCLogReaderBuilder).
+    /// After encountering first errors, all stream readers are gracefully stopped.
+    /// If multiple errors were encountered, only the last one is returned.
+    async fn run(&mut self) -> anyhow::Result<()> {
         let fetcher = get_generation_fetcher(
             &self.session,
             &self.keyspace,
@@ -220,12 +228,15 @@ impl CDCReaderWorker {
         }
     }
 
+    /// Updates all of the readers with the new upper timestamp.
+    /// When the timestamp is reached, the readers will stop after finishing the current request.
     async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
         for reader in self.readers.iter() {
             reader.set_upper_timestamp(new_upper_timestamp).await;
         }
     }
 
+    /// Updates all of the readers with the timestamp in the past, causing them to stop as soon as the current request finishes.
     async fn stop_now(&self) {
         self.set_upper_timestamp(chrono::Duration::MIN).await;
     }
