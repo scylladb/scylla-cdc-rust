@@ -252,8 +252,8 @@ impl StreamReader {
                     }
                 }
                 Err(
-                    ExecutionError::RequestTimeout(_)
-                    | ExecutionError::LastAttemptError(RequestAttemptError::DbError(
+                    err @ ExecutionError::RequestTimeout(_)
+                    | err @ ExecutionError::LastAttemptError(RequestAttemptError::DbError(
                         DbError::ReadTimeout { .. },
                         _,
                     )),
@@ -263,6 +263,7 @@ impl StreamReader {
                         &window_end,
                         sleep_after_timeout,
                         page_no,
+                        anyhow::Error::new(err),
                     )
                     .await;
                     // Waiting here is a bit suboptimal, as if this happens after generation change,
@@ -291,6 +292,7 @@ impl StreamReader {
         window_end: &value::CqlTimestamp,
         backoff: u128,
         page_no: u64,
+        driver_error: anyhow::Error,
     ) {
         if enabled!(tracing::Level::WARN) {
             let ids_str = self
@@ -305,6 +307,7 @@ impl StreamReader {
                 window_end_ms = window_end.0,
                 page_no = page_no,
                 current_backoff = backoff,
+                driver_error = format!("{:#}", driver_error),
                 "Timeout while fetching CDC rows."
             );
         }
