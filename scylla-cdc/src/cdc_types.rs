@@ -4,6 +4,7 @@ use scylla::frame::response::result::ColumnType;
 use scylla::serialize::SerializationError;
 use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::{CellWriter, WrittenCellProof};
+use scylla::statement::Statement;
 use scylla::value::CqlTimestamp;
 use std::fmt;
 
@@ -87,4 +88,10 @@ impl StreamID {
     pub fn new(stream_id: Vec<u8>) -> StreamID {
         StreamID { id: stream_id }
     }
+}
+
+pub(crate) fn make_idempotent_statement(query: String) -> Statement {
+    let mut statement = Statement::new(query);
+    statement.set_is_idempotent(true);
+    statement
 }

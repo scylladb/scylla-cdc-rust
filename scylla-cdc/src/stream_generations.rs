@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::warn;
 
-use crate::cdc_types::{GenerationTimestamp, StreamID};
+use crate::cdc_types::{GenerationTimestamp, StreamID, make_idempotent_statement};
 
 /// Component responsible for managing stream generations.
 #[async_trait]
@@ -301,19 +301,19 @@ impl TabletsGenerationFetcher {
         }
     }
 
-    fn get_all_stream_generations_query(&self) -> String {
-        format!(
+    fn get_all_stream_generations_query(&self) -> Statement {
+        make_idempotent_statement(format!(
             r#"
         SELECT timestamp
         FROM {}
         WHERE keyspace_name = ? AND table_name = ?;
         "#,
             self.timestamps_table_name
-        )
+        ))
     }
 
-    fn get_generation_by_timestamp_query(&self) -> String {
-        format!(
+    fn get_generation_by_timestamp_query(&self) -> Statement {
+        make_idempotent_statement(format!(
             r#"
         SELECT timestamp
         FROM {}
@@ -322,11 +322,11 @@ impl TabletsGenerationFetcher {
         LIMIT 1;
         "#,
             self.timestamps_table_name
-        )
+        ))
     }
 
-    fn get_next_generation_query(&self) -> String {
-        format!(
+    fn get_next_generation_query(&self) -> Statement {
+        make_idempotent_statement(format!(
             r#"
         SELECT timestamp
         FROM {}
@@ -335,25 +335,25 @@ impl TabletsGenerationFetcher {
         LIMIT 1;
         "#,
             self.timestamps_table_name
-        )
+        ))
     }
 
-    fn get_stream_ids_by_time_query(&self) -> String {
-        format!(
+    fn get_stream_ids_by_time_query(&self) -> Statement {
+        make_idempotent_statement(format!(
             r#"
         SELECT stream_id
         FROM {}
         WHERE keyspace_name = ? AND table_name = ? AND timestamp = ? AND stream_state = ?;
         "#,
             self.streams_table_name
-        )
+        ))
     }
 }
 
 #[async_trait]
 impl GenerationFetcher for TabletsGenerationFetcher {
     async fn fetch_all_generations(&self) -> anyhow::Result<Vec<GenerationTimestamp>> {
-        let mut query = Statement::new(self.get_all_stream_generations_query());
+        let mut query = self.get_all_stream_generations_query();
         query.set_page_size(DEFAULT_PAGE_SIZE);
 
         let generations = self
@@ -372,7 +372,7 @@ impl GenerationFetcher for TabletsGenerationFetcher {
         &self,
         time: &chrono::Duration,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
-        let query = Statement::new(self.get_generation_by_timestamp_query());
+        let query = self.get_generation_by_timestamp_query();
 
         let result = self
             .session
@@ -396,7 +396,7 @@ impl GenerationFetcher for TabletsGenerationFetcher {
         &self,
         generation: &GenerationTimestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
-        let query = Statement::new(self.get_next_generation_query());
+        let query = self.get_next_generation_query();
 
         let result = self
             .session
@@ -413,7 +413,7 @@ impl GenerationFetcher for TabletsGenerationFetcher {
         &self,
         generation: &GenerationTimestamp,
     ) -> anyhow::Result<Vec<Vec<StreamID>>> {
-        let mut query = Statement::new(self.get_stream_ids_by_time_query());
+        let mut query = self.get_stream_ids_by_time_query();
         query.set_page_size(DEFAULT_PAGE_SIZE);
 
         let result = self
@@ -442,8 +442,10 @@ async fn get_cluster_size(session: &Session) -> anyhow::Result<usize> {
     // We are using default consistency here since the system keyspace is special and
     // the coordinator which handles the query will only read local data
     // and will not contact other nodes, so the query will work with any cluster size larger than 0.
+    let statement = make_idempotent_statement("SELECT COUNT(*) FROM system.peers".to_owned());
+
     let (peers_num,) = session
-        .query_unpaged("SELECT COUNT(*) FROM system.peers", &[])
+        .query_unpaged(statement, &[])
         .await?
         .into_rows_result()?
         .first_row::<(i64,)>()?;

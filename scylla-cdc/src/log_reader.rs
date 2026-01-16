@@ -25,7 +25,7 @@ use scylla::client::session::Session;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::cdc_types::GenerationTimestamp;
+use crate::cdc_types::{GenerationTimestamp, make_idempotent_statement};
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
 use crate::stream_generations::get_generation_fetcher;
@@ -62,12 +62,14 @@ impl CDCLogReader {
 
     /// Checks if the given keyspace uses tablets by querying system_schema.scylla_keyspaces.
     async fn uses_tablets(session: &Session, keyspace: &str) -> anyhow::Result<bool> {
-        let query =
+        let statement = make_idempotent_statement(
             "SELECT initial_tablets FROM system_schema.scylla_keyspaces WHERE keyspace_name = ?"
-                .to_string();
+                .to_owned(),
+        );
+
         // the query may fail on old scylla versions that don't have this table. in this case return
         // false because it doesn't support tablets.
-        let result = match session.query_unpaged(query, (keyspace,)).await {
+        let result = match session.query_unpaged(statement, (keyspace,)).await {
             Ok(r) => r,
             Err(_) => return Ok(false),
         };

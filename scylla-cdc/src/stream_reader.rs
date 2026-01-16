@@ -122,7 +122,12 @@ impl StreamReader {
             AND \"cdc$time\" >= minTimeuuid(?) \
             AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE"
         );
-        let query_base = self.session.prepare_statement(query).await?;
+        let query_base = {
+            let mut query_base = self.session.prepare_statement(query).await?;
+            query_base.set_is_idempotent(true);
+            query_base
+        };
+
         let mut window_begin = self.config.lower_timestamp;
         let window_size = chrono::Duration::from_std(self.config.window_size)?;
         let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;

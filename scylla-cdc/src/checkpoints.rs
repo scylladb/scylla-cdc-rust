@@ -1,5 +1,5 @@
 //! A module representing the logic behind saving progress.
-use crate::cdc_types::{GenerationTimestamp, StreamID};
+use crate::cdc_types::{GenerationTimestamp, StreamID, make_idempotent_statement};
 use anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -183,16 +183,15 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 
     /// Loads last seen generation timestamp or `None`.
     async fn load_last_generation(&self) -> anyhow::Result<Option<GenerationTimestamp>> {
+        let statement = make_idempotent_statement(format!(
+            "SELECT generation FROM {}
+                    WHERE stream_id = ?",
+            self.checkpoint_table
+        ));
+
         let generation = self
             .session
-            .query_unpaged(
-                format!(
-                    "SELECT generation FROM {}
-                    WHERE stream_id = ?",
-                    self.checkpoint_table
-                ),
-                (get_default_generation_pk(),),
-            )
+            .query_unpaged(statement, (get_default_generation_pk(),))
             .await?
             .into_rows_result()?
             .maybe_first_row::<(GenerationTimestamp,)>()?
@@ -206,17 +205,16 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
         &self,
         stream_id: &StreamID,
     ) -> anyhow::Result<Option<chrono::Duration>> {
-        Ok(self
-            .session
-            .query_unpaged(
-                format!(
-                    "SELECT time FROM {}
+        let statement = make_idempotent_statement(format!(
+            "SELECT time FROM {}
                     WHERE stream_id = ?
                     LIMIT 1",
-                    self.checkpoint_table
-                ),
-                (stream_id,),
-            )
+            self.checkpoint_table
+        ));
+
+        Ok(self
+            .session
+            .query_unpaged(statement, (stream_id,))
             .await?
             .into_rows_result()?
             .maybe_first_row::<(value::CqlTimestamp,)>()?
