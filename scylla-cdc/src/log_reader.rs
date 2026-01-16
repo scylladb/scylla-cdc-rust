@@ -140,80 +140,82 @@ impl CDCReaderWorker {
                 }
             }
 
-            if stream_reader_tasks.is_empty() {
-                if let Some(err) = err {
-                    return Err(err);
+            if !stream_reader_tasks.is_empty() {
+                continue;
+            }
+
+            if let Some(err) = err {
+                return Err(err);
+            }
+
+            if let Some(generation) = next_generation.take() {
+                current_generation = Some(generation.clone());
+                if generation.timestamp > self.end_timestamp {
+                    return Ok(());
                 }
 
-                if let Some(generation) = next_generation.take() {
-                    current_generation = Some(generation.clone());
-                    if generation.timestamp > self.end_timestamp {
-                        return Ok(());
-                    }
+                if self.config.should_save_progress {
+                    self.config
+                        .checkpoint_saver
+                        .as_ref()
+                        .unwrap()
+                        .save_new_generation(&generation)
+                        .await?;
+                }
 
-                    if self.config.should_save_progress {
-                        self.config
-                            .checkpoint_saver
-                            .as_ref()
-                            .unwrap()
-                            .save_new_generation(&generation)
-                            .await?;
-                    }
+                reader_config.lower_timestamp =
+                    max(self.config.lower_timestamp, generation.timestamp);
 
-                    reader_config.lower_timestamp =
-                        max(self.config.lower_timestamp, generation.timestamp);
+                self.readers = fetcher
+                    .fetch_stream_ids(&generation)
+                    .await?
+                    .into_iter()
+                    .map(|stream_ids| {
+                        Arc::new(StreamReader::new(
+                            &self.session,
+                            stream_ids,
+                            reader_config.clone(),
+                        ))
+                    })
+                    .collect();
 
-                    self.readers = fetcher
-                        .fetch_stream_ids(&generation)
-                        .await?
-                        .into_iter()
-                        .map(|stream_ids| {
-                            Arc::new(StreamReader::new(
-                                &self.session,
-                                stream_ids,
-                                reader_config.clone(),
-                            ))
+                self.set_upper_timestamp(self.end_timestamp).await;
+
+                stream_reader_tasks = self
+                    .readers
+                    .iter()
+                    .map(|reader| {
+                        let reader = Arc::clone(reader);
+                        let keyspace = self.keyspace.clone();
+                        let table_name = self.table_name.clone();
+                        let factory = Arc::clone(&self.consumer_factory);
+                        tokio::spawn(async move {
+                            let consumer = factory.new_consumer().await;
+                            reader.fetch_cdc(keyspace, table_name, consumer).await
                         })
-                        .collect();
-
-                    self.set_upper_timestamp(self.end_timestamp).await;
-
-                    stream_reader_tasks = self
-                        .readers
-                        .iter()
-                        .map(|reader| {
-                            let reader = Arc::clone(reader);
-                            let keyspace = self.keyspace.clone();
-                            let table_name = self.table_name.clone();
-                            let factory = Arc::clone(&self.consumer_factory);
-                            tokio::spawn(async move {
-                                let consumer = factory.new_consumer().await;
-                                reader.fetch_cdc(keyspace, table_name, consumer).await
-                            })
-                        })
-                        .collect();
-                } else if let Some(current) = current_generation.take() {
-                    if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
-                        if generation.timestamp <= self.end_timestamp {
-                            // Fetched next generation with lower or equal timestamp than end_timestamp
-                            next_generation = Some(generation.clone());
-                            self.set_upper_timestamp(generation.timestamp).await;
-                            continue;
-                        } else {
-                            // Fetched next generation with bigger timestamp than end_timestamp
-                            return Ok(());
-                        }
+                    })
+                    .collect();
+            } else if let Some(current) = current_generation.take() {
+                if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
+                    if generation.timestamp <= self.end_timestamp {
+                        // Fetched next generation with lower or equal timestamp than end_timestamp
+                        next_generation = Some(generation.clone());
+                        self.set_upper_timestamp(generation.timestamp).await;
+                        continue;
                     } else {
-                        // Current generation's next generation is not available
-                        warn!(
-                            "Next generation is not available, some rows in the CDC log table may be unread."
-                        );
+                        // Fetched next generation with bigger timestamp than end_timestamp
                         return Ok(());
                     }
                 } else {
-                    // First generation is not fetched
+                    // Current generation's next generation is not available
+                    warn!(
+                        "Next generation is not available, some rows in the CDC log table may be unread."
+                    );
                     return Ok(());
                 }
+            } else {
+                // First generation is not fetched
+                return Ok(());
             }
         }
     }
