@@ -22,6 +22,7 @@ use futures::FutureExt;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use scylla::client::session::Session;
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
@@ -189,10 +190,8 @@ impl CDCReaderWorker {
 
                 self.set_upper_timestamp(self.end_timestamp).await;
 
-                stream_reader_tasks = self
-                    .readers
-                    .iter()
-                    .map(|reader| {
+                let spawn_new_cdc_fetcher =
+                    |reader: &Arc<StreamReader>| -> JoinHandle<anyhow::Result<()>> {
                         let reader = Arc::clone(reader);
                         let keyspace = self.keyspace.clone();
                         let table_name = self.table_name.clone();
@@ -201,8 +200,10 @@ impl CDCReaderWorker {
                             let consumer = factory.new_consumer().await;
                             reader.fetch_cdc(keyspace, table_name, consumer).await
                         })
-                    })
-                    .collect();
+                    };
+
+                // Spawn a task for each stream reader to fetch CDC rows
+                stream_reader_tasks = self.readers.iter().map(spawn_new_cdc_fetcher).collect();
             } else if let Some(current) = current_generation.take() {
                 if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
                     if generation.timestamp <= self.end_timestamp {
