@@ -260,6 +260,9 @@ impl StreamReader {
                         page_no,
                     )
                     .await;
+                    // Waiting here is a bit suboptimal, as if this happens after generation change,
+                    // we will still sleep, slowing down the process of opening streams for new generation.
+                    // Those streams will be opened only after all instances of fetch_cdc return.
                     sleep(time::Duration::from_millis(sleep_after_timeout as u64)).await;
                     sleep_after_timeout *= TIMEOUT_FACTOR;
                     if sleep_after_timeout >= self.config.sleep_interval.as_millis() {

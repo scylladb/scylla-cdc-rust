@@ -159,6 +159,20 @@ impl CDCReaderWorker {
                 continue;
             }
 
+            // We make changes to the stream readers related to generation changes,
+            // only when all of the current stream readers have finished their work.
+            // When we encounter a new generation, all streams are closed, by setting
+            // their upper timestamp to the generation's timestamp.
+            // Because this is not instant, this means we must wait for all stream readers to finish.
+            // If for some reason this will take a long time (for example the connection has closed,
+            // and we need to wait for the timeout), the opening of streams for the new generation
+            // will be delayed. On the other hand, we still may receive some important updates from
+            // the current generation.
+            //
+            // One option would be to open streams for the new generation while we still wait for the
+            // current generation's streams to close. To consider doing this, we would not break
+            // any guarantees, by proving messages from old generation after new generation's messages.
+
             if let Some(generation) = next_generation.take() {
                 current_generation = Some(generation.clone());
                 if generation.timestamp > self.end_timestamp {
