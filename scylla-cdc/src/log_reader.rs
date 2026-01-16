@@ -102,7 +102,7 @@ impl CDCReaderWorker {
     /// with the tokio sender inside [`CDCLogReader`](self::CDCLogReader),
     /// which was created alongside this worker inside a [`CDCLogReaderBuilder`](self::CDCLogReaderBuilder).
     /// After encountering first errors, all stream readers are gracefully stopped.
-    /// If multiple errors were encountered, only the last one is returned.
+    /// If multiple errors were encountered, only the first one is returned and the following errors are logged at WARNING level.
     async fn run(&mut self) -> anyhow::Result<()> {
         let fetcher = get_generation_fetcher(
             &self.session,
@@ -119,30 +119,36 @@ impl CDCReaderWorker {
 
         let mut next_generation: Option<GenerationTimestamp> = None;
         let mut current_generation: Option<GenerationTimestamp> = None;
-        let mut err: Option<anyhow::Error> = None;
 
         let mut reader_config = self.config.clone();
 
         loop {
             tokio::select! {
                 Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated() => {
-                    match evt {
-                        Err(error) => {
-                            err = Some(anyhow::Error::new(error));
-                            self.stop_now().await;
+                    let err = match evt {
+                        Err(error) => Some(anyhow::Error::new(error)),
+                        Ok(Err(error)) => Some(error),
+                        _ => None
+                    };
+                    if let Some(err) = err {
+                        self.stop_now().await;
+                        // We only need to wait for other tasks to finish, we can ignore
+                        // any changes to the generation_receiver or end_timestamp_receiver
+                        while !stream_reader_tasks.is_empty() {
+                            match stream_reader_tasks.next().await {
+                                Some(Err(e)) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader task panicked: {:#}", e),
+                                Some(Ok(Err(e))) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader returned an error: {:#}", e),
+                                None | Some(Ok(Ok(_)))=> {},
+                            };
                         }
-                        Ok(Err(error)) => {
-                            err = Some(error);
-                            self.stop_now().await;
-                        },
-                        _ => {}
+                        return Err(err);
                     }
                 }
-                Some(generation) = generation_receiver.recv(), if next_generation.is_none() && err.is_none() => {
+                Some(generation) = generation_receiver.recv(), if next_generation.is_none() => {
                     next_generation = Some(generation.clone());
                     self.set_upper_timestamp(generation.timestamp).await;
                 }
-                Ok(_) = self.end_timestamp_receiver.changed(), if err.is_none() => {
+                Ok(_) = self.end_timestamp_receiver.changed() => {
                     let timestamp = *self.end_timestamp_receiver.borrow_and_update();
                     self.end_timestamp = timestamp;
                     self.set_upper_timestamp(timestamp).await;
@@ -151,10 +157,6 @@ impl CDCReaderWorker {
 
             if !stream_reader_tasks.is_empty() {
                 continue;
-            }
-
-            if let Some(err) = err {
-                return Err(err);
             }
 
             if let Some(generation) = next_generation.take() {
