@@ -21,7 +21,7 @@ use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 
-const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(10);
+const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 const TIMEOUT_FACTOR: u32 = 2;
 
 #[derive(Clone)]
