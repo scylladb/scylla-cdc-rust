@@ -490,6 +490,8 @@ pub fn get_generation_fetcher(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rstest::rstest;
     use scylla_cdc_test_utils::prepare_db;
 
@@ -716,11 +718,13 @@ mod tests {
         if tablets_enabled {
             let fetcher = tablets_tests::setup().await?;
             let session = Arc::clone(&fetcher.session);
-            Ok((Arc::new(fetcher), session))
+            let fetcher_arc: Arc<dyn GenerationFetcher> = Arc::new(fetcher);
+            Ok((fetcher_arc, session))
         } else {
             let fetcher = vnode_tests::setup().await?;
             let session = Arc::clone(&fetcher.session);
-            Ok((Arc::new(fetcher), session))
+            let fetcher_arc: Arc<dyn GenerationFetcher> = Arc::new(fetcher);
+            Ok((fetcher_arc, session))
         }
     }
 

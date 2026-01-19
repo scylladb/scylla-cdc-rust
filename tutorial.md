@@ -1,8 +1,8 @@
 # Tutorial for scylla-cdc-rust
 
-This document will guide you through all steps of creating an example 
-application using the library. 
-We're going to create a simpler version of the [printer](scylla-cdc-printer). 
+This document will guide you through all steps of creating an example
+application using the library.
+We're going to create a simpler version of the [printer](scylla-cdc-printer).
 
 For the purpose of this tutorial, we're going to assume that the table
 we want to observe the logs for was created by using the following query:
@@ -12,17 +12,21 @@ CREATE TABLE ks.t (pk int, ck int, v int, vs set<int>, PRIMARY KEY (pk, ck)) WIT
 ```
 
 ## Creating the CDC consumer
-The most important part of using the library is to define a callback that will be executed 
-after reading a CDC log from the database. 
-Such callback is defined by implementing the `Consumer` trait located in `scylla-cdc::consumer`. 
+
+The most important part of using the library is to define a callback that will be executed
+after reading a CDC log from the database.
+Such callback is defined by implementing the `Consumer` trait located in `scylla-cdc::consumer`.
 As for now, we will define a struct with no member variables for this purpose:
+
 ```rust
 struct TutorialConsumer;
 ```
-Since the callback will be executed asynchronously, 
-we have to use the [async-trait](https://crates.io/crates/async-trait) crate 
-to implement the `Consumer` trait. 
+
+Since the callback will be executed asynchronously,
+we have to use the [async-trait](https://crates.io/crates/async-trait) crate
+to implement the `Consumer` trait.
 We also use the [anyhow](https://crates.io/crates/anyhow) crate for error handling.
+
 ```rust
 use anyhow;
 use async_trait::async_trait;
@@ -43,6 +47,7 @@ We'll cover on how to use the `CDCRow` structure in [Using CDCRow](tutorial.md#u
 
 The library is going to create one instance of `TutorialConsumer` per CDC stream, so we also need to define
 a `ConsumerFactory` for them:
+
 ```rust
 struct TutorialConsumerFactory;
 
@@ -55,14 +60,15 @@ impl ConsumerFactory for TutorialConsumerFactory {
 ```
 
 ### Adding shared state to the consumer
-Different instances of `Consumer` are being used in separate Tokio tasks. 
+
+Different instances of `Consumer` are being used in separate Tokio tasks.
 Due to that, the runtime might schedule them on separate threads.
 
-Because of that, a struct implementing the `Consumer` trait should also implement `Send` trait 
+Because of that, a struct implementing the `Consumer` trait should also implement `Send` trait
 and a struct implementing the `ConsumerFactory` trait should implement `Send` and `Sync` traits.
 Luckily, Rust implements these traits by default if all member variables of a struct implement them.
 
-If the consumers need to share some state, like a reference to an object, 
+If the consumers need to share some state, like a reference to an object,
 they can be wrapped in an [Arc](<https://doc.rust-lang.org/std/sync/struct.Arc.html>).
 
 An example of that might be a `Consumer` that counts rows read by all its instances:
@@ -84,12 +90,14 @@ impl Consumer for CountingConsumer {
 }
 ```
 
-__Note__: in general, keeping a mutable state in the `Consumer` is not recommended, 
+__Note__: in general, keeping a mutable state in the `Consumer` is not recommended,
 since it requires synchronization (i.e. a mutex or an atomic like `AtomicUsize`),
 which reduces the speedup granted by Tokio by running the `Consumer` logic on multiple cores.
 
 ## Starting the application
+
 Now we're ready to create our `main` function:
+
 ```rust
 use scylla::SessionBuilder;
 use scylla_cdc::log_reader::CDCLogReaderBuilder;
@@ -127,34 +135,38 @@ async fn main() -> anyhow::Result<()> {
     handle.await
 }
 ```
+
 As we can see, we have to configure a few things in order to start the log reader:
 
-- First, we have to create a connection to the database, 
+- First, we have to create a connection to the database,
 using the `Session` struct from [Scylla Rust Driver](https://crates.io/crates/scylla).
 - Second, specify the keyspace and the table name.
-- Then, we create time bounds for our reader. 
+- Then, we create time bounds for our reader.
 This step is not compulsory - by default the reader will start reading from now and will continue reading forever.
 In our case, we are going to read all logs added during the last 6 minutes.
-- Next, create the factory. 
+- Next, create the factory.
 - Now, we can build the log reader.
 
 To see more information about possible configuration of the log reader, see the [documentation](https://docs.rs/scylla-cdc/latest/scylla-cdc/log_reader/index.html).
 Notice, that the `Session` with the database and the factory must be wrapped inside an `Arc`.
 
-After creating the log reader we can `await` the handle it returns 
+After creating the log reader we can `await` the handle it returns
 so that our application will terminate as soon as the reader finishes.
 
-Now - let's insert some rows into the table. 
+Now - let's insert some rows into the table.
 After inserting 3 rows and running the application, you should see the output:
-``` 
+
+```txt
 Hello, scylla-cdc!
 Hello, scylla-cdc!
 Hello, scylla-cdc!
 ```
-The application printed one line for each CDC log consumed. 
+
+The application printed one line for each CDC log consumed.
 Now we can proceed and see how to use `CDCRow` struct to process the data.
 
 ## Using CDCRow
+
 Having learned how to run the log reader, we can finally create the main logic of our application.
 We will edit the `consume_cdc` function of the `TutorialConsumer`.
 
@@ -168,14 +180,15 @@ In general, there are four types of columns in CDC. You can access them in the f
 The data returned is of type [CqlValue](<https://docs.rs/scylla/latest/scylla/frame/response/result/enum.CqlValue.html>)
 from the driver.
 
-For more detailed information about how to interpret these values, 
+For more detailed information about how to interpret these values,
 check the [CDC documentation](<https://docs.scylladb.com/using-scylla/cdc/cdc-log-table/>).
 
-It is assumed that the user knows the metadata of their table, 
-but they can check if such a column exists in the CDC log, e.g. with method `column_exists`. 
+It is assumed that the user knows the metadata of their table,
+but they can check if such a column exists in the CDC log, e.g. with method `column_exists`.
 Refer to the [API documentation](https://docs.rs/scylla-cdc/latest/scylla-cdc/consumer/struct.CDCRow.html) to find an appropriate method.
 
 Back to our application, we will add printing of the data from the table:
+
 ```rust
 async fn consume_cdc(&mut self, mut data: CDCRow<'_>) -> anyhow::Result<()> {
     println!("_________");
@@ -202,8 +215,10 @@ async fn consume_cdc(&mut self, mut data: CDCRow<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
 An example of the output:
-``` 
+
+```txt
 _________
 Time UUID: 41183ab8-d07c-11ec-d982-2470743b0298, operation type: RowUpdate
 pk: 7, ck: 5
@@ -219,14 +234,17 @@ _________
 ```
 
 __Note__: CDCRow's lifetime does not allow it to exist after the function terminates.
-If the user wants to save the data for later 
+If the user wants to save the data for later
 (e.g. in a consumer that saves all consumed rows in a `vec`)
 they should map the rows to another data structure.
+
 ## Saving progress
+
 User can periodically save progress while consuming CDC logs and restore it in case of some error.
 This way, the reading can start from last saved checkpoint instead of a timestamp given by the user.
 
 Progress is identified by checkpoints using the `Checkpoint` struct defined as follows:
+
 ```rust
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -238,6 +256,7 @@ pub struct Checkpoint {
 ```
 
 Managing saving and restoring is used by implementing `CDCCheckpointSaver` trait defined as follows:
+
 ```rust
 #[async_trait]
 pub trait CDCCheckpointSaver: Send + Sync {
@@ -250,11 +269,13 @@ pub trait CDCCheckpointSaver: Send + Sync {
     ) -> anyhow::Result<Option<chrono::Duration>>;
 }
 ```
-User can use any way they want to manage checkpoints, for example they can store it in a database or in a file. 
-There is a default implementation that uses ScyllaDB called `TableBackedCheckpointSaver`. 
+
+User can use any way they want to manage checkpoints, for example they can store it in a database or in a file.
+There is a default implementation that uses ScyllaDB called `TableBackedCheckpointSaver`.
 Its source code is located in file [checkpoints.rs](scylla-cdc/src/checkpoints.rs) and can serve as an inspiration how to write new checkpoint savers.
 
 Example of usage for `TableBackedCheckpointSaver`:
+
 ```rust
 let user_checkpoint_saver = Arc::new(
     TableBackedCheckpointSaver::new_with_default_ttl(session, "ks", "checkpoints")
@@ -262,8 +283,10 @@ let user_checkpoint_saver = Arc::new(
         .unwrap(),
 );
 ```
+
 This example will create checkpoint_saver that will save checkpoints in `keyspace.table_name` table using default TTL of 7 days.
 User can also explicitly provide TTL:
+
 ```rust
 let ttl: i64 = 3600; // TTL of 3600 seconds (one hour).
 let user_checkpoint_saver = Arc::new(
@@ -272,10 +295,11 @@ let user_checkpoint_saver = Arc::new(
         .unwrap(),
 );
 ```
+
 __Note__: TTL is measured in seconds.
 
+To save progress, the user needs to enable it while building the `CDCLogReader` and provide an `Arc` containing an object that implements `CDCCheckpointSaver`.
 
-To save progress, the user needs to enable it while building the `CDCLogReader` and provide an `Arc` containing an object that implements `CDCCheckpointSaver`. 
 ```rust
 let (log_reader, handle) = CDCLogReaderBuilder::new()
     // ...
@@ -285,4 +309,5 @@ let (log_reader, handle) = CDCLogReaderBuilder::new()
     .checkpoint_saver(user_checkpoint_saver) // Use `user_checkpoint_saver to manage checkpoints.
     .build();
 ```
+
 __Note__: Setting saving/loading progress requires also setting checkpoint_saver to be used.
