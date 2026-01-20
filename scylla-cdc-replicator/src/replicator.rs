@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::time;
+use std::{sync::Arc, time::Duration};
 
 use futures_util::future::RemoteHandle;
 use futures_util::stream::FuturesUnordered;
@@ -21,10 +20,10 @@ impl Replicator {
         dest_uri: String,
         dest_keyspace: String,
         dest_tables: Vec<String>,
-        start_timestamp: chrono::Duration,
-        window_size: time::Duration,
-        safety_interval: time::Duration,
-        sleep_interval: time::Duration,
+        start_timestamp: Duration,
+        window_size: Duration,
+        safety_interval: Duration,
+        sleep_interval: Duration,
     ) -> anyhow::Result<(Self, FuturesUnordered<RemoteHandle<anyhow::Result<()>>>)> {
         let source_session = Arc::new(SessionBuilder::new().known_node(source_uri).build().await?);
         let dest_session = Arc::new(SessionBuilder::new().known_node(dest_uri).build().await?);

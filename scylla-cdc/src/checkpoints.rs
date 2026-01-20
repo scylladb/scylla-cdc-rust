@@ -65,10 +65,7 @@ pub trait CDCCheckpointSaver: Send + Sync {
     /// Loads last seen generation from the checkpoint table.
     async fn load_last_generation(&self) -> anyhow::Result<Option<GenerationTimestamp>>;
     /// Loads last seen timestamp for given stream id from the checkpoint table.
-    async fn load_last_checkpoint(
-        &self,
-        stream_id: &StreamID,
-    ) -> anyhow::Result<Option<chrono::Duration>>;
+    async fn load_last_checkpoint(&self, stream_id: &StreamID) -> anyhow::Result<Option<Duration>>;
 }
 
 /// Default implementation for [`CDCCheckpointSaver`] trait.
@@ -202,10 +199,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
     }
 
     /// Loads last seen timestamp or `None`.
-    async fn load_last_checkpoint(
-        &self,
-        stream_id: &StreamID,
-    ) -> anyhow::Result<Option<chrono::Duration>> {
+    async fn load_last_checkpoint(&self, stream_id: &StreamID) -> anyhow::Result<Option<Duration>> {
         Ok(self
             .session
             .query_unpaged(
@@ -220,7 +214,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
             .await?
             .into_rows_result()?
             .maybe_first_row::<(value::CqlTimestamp,)>()?
-            .map(|t| chrono::Duration::milliseconds(t.0.0)))
+            .map(|t| Duration::from_millis(t.0.0 as u64)))
     }
 }
 
@@ -281,7 +275,7 @@ mod tests {
                 id: vec![1, 1, 1, 1, 1, 1, 1, 1],
             },
             generation: GenerationTimestamp {
-                timestamp: chrono::Duration::MIN,
+                timestamp: Duration::from_secs(0),
             },
         };
 
@@ -306,8 +300,6 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .to_std()
-                .unwrap()
         )
     }
 
@@ -317,10 +309,10 @@ mod tests {
         let (session, table_name, cp_saver) = setup().await;
 
         let mut generation = GenerationTimestamp {
-            timestamp: chrono::Duration::zero(),
+            timestamp: Duration::from_secs(0),
         };
 
-        let delta = chrono::Duration::seconds(10);
+        let delta = Duration::from_secs(10);
 
         for _ in 0..N {
             generation.timestamp = generation.timestamp.add(delta);
@@ -353,7 +345,7 @@ mod tests {
                 timestamp: Duration::from_secs(random::<u64>() % (100u64 * N_OF_IDS as u64)),
                 stream_id: StreamID { id: vec![0, i] },
                 generation: GenerationTimestamp {
-                    timestamp: chrono::Duration::MAX,
+                    timestamp: Duration::MAX,
                 },
             };
 
@@ -370,7 +362,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(saved_checkpoint.to_std().unwrap(), cp.timestamp);
+            assert_eq!(saved_checkpoint, cp.timestamp);
         }
     }
 }

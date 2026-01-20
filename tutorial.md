@@ -112,12 +112,10 @@ async fn main() -> anyhow::Result<()> {
             .build()
             .await?,
     );
-    let end = chrono::Duration::from_std(
-        SystemTime::now()
+    let end = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap(),
-    ).unwrap();
-    let start = end - chrono::Duration::seconds(360);
+            .unwrap();
+    let start = end - Duration::from_secs(360);
     
     let factory = Arc::new(TutorialConsumerFactory);
     
@@ -266,7 +264,7 @@ pub trait CDCCheckpointSaver: Send + Sync {
     async fn load_last_checkpoint(
         &self,
         stream_id: &StreamID,
-    ) -> anyhow::Result<Option<chrono::Duration>>;
+    ) -> anyhow::Result<Option<std::time::Duration>>;
 }
 ```
 
