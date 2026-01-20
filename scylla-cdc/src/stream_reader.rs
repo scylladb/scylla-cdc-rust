@@ -2,7 +2,7 @@
 
 use std::cmp::{max, min};
 use std::sync::Arc;
-use std::time;
+use std::time::{self, Duration};
 
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -21,8 +21,8 @@ use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 
-const BASIC_TIMEOUT_SLEEP_MS: u128 = 10;
-const TIMEOUT_FACTOR: u128 = 2;
+const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+const TIMEOUT_FACTOR: u32 = 2;
 
 #[derive(Clone)]
 pub struct CDCReaderConfig {
@@ -122,7 +122,12 @@ impl StreamReader {
             AND \"cdc$time\" >= minTimeuuid(?) \
             AND \"cdc$time\" < minTimeuuid(?)  BYPASS CACHE"
         );
-        let query_base = self.session.prepare_statement(query).await?;
+        let query_base = {
+            let mut query_base = self.session.prepare_statement(query).await?;
+            query_base.set_is_idempotent(true);
+            query_base
+        };
+
         let mut window_begin = self.config.lower_timestamp;
         let window_size = chrono::Duration::from_std(self.config.window_size)?;
         let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
@@ -213,7 +218,7 @@ impl StreamReader {
         window_begin: value::CqlTimestamp,
         window_end: value::CqlTimestamp,
     ) -> anyhow::Result<()> {
-        let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
+        let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP;
 
         let mut next_state = PagingState::start();
         let mut page_no = 0;
@@ -231,7 +236,7 @@ impl StreamReader {
                 .await;
             match query_res {
                 Ok((query_result, paging_state_response)) => {
-                    sleep_after_timeout = BASIC_TIMEOUT_SLEEP_MS;
+                    sleep_after_timeout = BASIC_TIMEOUT_SLEEP;
                     page_no += 1;
                     let query_rows_result = query_result.into_rows_result()?;
                     let schema = CDCRowSchema::new(query_rows_result.column_specs());
@@ -247,8 +252,8 @@ impl StreamReader {
                     }
                 }
                 Err(
-                    ExecutionError::RequestTimeout(_)
-                    | ExecutionError::LastAttemptError(RequestAttemptError::DbError(
+                    err @ ExecutionError::RequestTimeout(_)
+                    | err @ ExecutionError::LastAttemptError(RequestAttemptError::DbError(
                         DbError::ReadTimeout { .. },
                         _,
                     )),
@@ -258,15 +263,16 @@ impl StreamReader {
                         &window_end,
                         sleep_after_timeout,
                         page_no,
+                        anyhow::Error::new(err),
                     )
                     .await;
                     // Waiting here is a bit suboptimal, as if this happens after generation change,
                     // we will still sleep, slowing down the process of opening streams for new generation.
                     // Those streams will be opened only after all instances of fetch_cdc return.
-                    sleep(time::Duration::from_millis(sleep_after_timeout as u64)).await;
+                    sleep(sleep_after_timeout).await;
                     sleep_after_timeout *= TIMEOUT_FACTOR;
-                    if sleep_after_timeout >= self.config.sleep_interval.as_millis() {
-                        sleep_after_timeout = self.config.sleep_interval.as_millis();
+                    if sleep_after_timeout >= self.config.sleep_interval {
+                        sleep_after_timeout = self.config.sleep_interval;
                     }
 
                     next_state = state_clone;
@@ -284,8 +290,9 @@ impl StreamReader {
         &self,
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
-        backoff: u128,
+        backoff: Duration,
         page_no: u64,
+        driver_error: anyhow::Error,
     ) {
         if enabled!(tracing::Level::WARN) {
             let ids_str = self
@@ -299,7 +306,8 @@ impl StreamReader {
                 window_begin_ms = window_begin.0,
                 window_end_ms = window_end.0,
                 page_no = page_no,
-                current_backoff = backoff,
+                current_backoff_ms = backoff.as_millis(),
+                driver_error = format!("{:#}", driver_error),
                 "Timeout while fetching CDC rows."
             );
         }
