@@ -5,7 +5,7 @@ mod tests {
     use std::convert::identity;
     use std::hash::Hash;
     use std::sync::Arc;
-    use std::time;
+    use std::time::{self, Duration};
 
     use anyhow::{Result, bail};
     use async_trait::async_trait;
@@ -297,7 +297,7 @@ mod tests {
             results.into_iter().all(identity)
         }
 
-        async fn test_cdc(mut self, start: chrono::Duration) -> Result<()> {
+        async fn test_cdc(mut self, start: Duration) -> Result<()> {
             let results = Arc::new(Mutex::new(HashMap::new()));
             let factory = Arc::new(TestConsumerFactory::new(Arc::clone(&results)));
             let end = now();
@@ -306,8 +306,8 @@ mod tests {
                 .session(Arc::clone(&self.session))
                 .keyspace(self.keyspace.as_str())
                 .table_name(self.table_name.as_str())
-                .start_timestamp(start - chrono::Duration::seconds(2))
-                .end_timestamp(end + chrono::Duration::seconds(2))
+                .start_timestamp(start - Duration::from_secs(2))
+                .end_timestamp(end + Duration::from_secs(2))
                 .window_size(time::Duration::from_millis(WINDOW_SIZE))
                 .safety_interval(time::Duration::from_millis(SAFETY_INTERVAL))
                 .sleep_interval(time::Duration::from_millis(SLEEP_INTERVAL))
@@ -433,8 +433,8 @@ mod tests {
     async fn create_reader_with_saving(
         test: &Test,
         factory: &Arc<TestConsumerFactory>,
-        start: chrono::Duration,
-        end: chrono::Duration,
+        start: Duration,
+        end: Duration,
     ) -> RemoteHandle<Result<()>> {
         let default_cp_saver = Arc::new(
             TableBackedCheckpointSaver::new(
@@ -496,13 +496,9 @@ mod tests {
             insert_new_rows_for_saving_test(&mut test, i).await;
             let end = now();
 
-            let handle = create_reader_with_saving(
-                &test,
-                &factory,
-                start,
-                end + chrono::Duration::seconds(1),
-            )
-            .await;
+            let handle =
+                create_reader_with_saving(&test, &factory, start, end + Duration::from_secs(1))
+                    .await;
 
             handle.await.unwrap();
         }

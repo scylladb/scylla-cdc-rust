@@ -50,10 +50,10 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let tables: Vec<_> = args.table.split(',').map(|s| s.to_string()).collect();
     assert!(!tables.is_empty(), "no tables were provided");
-    let start_timestamp = chrono::Duration::milliseconds(match args.start_datetime {
+    let start_timestamp = Duration::from_millis(match args.start_datetime {
         Some(s) => chrono::DateTime::parse_from_rfc3339(&s)?.timestamp_millis(),
         None => chrono::Local::now().timestamp_millis(),
-    });
+    } as u64);
     let sleep_interval = Duration::from_secs_f64(args.sleep_interval);
     let mut result = Ok(());
 

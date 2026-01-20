@@ -6,16 +6,17 @@ use scylla::serialize::value::SerializeValue;
 use scylla::serialize::writers::{CellWriter, WrittenCellProof};
 use scylla::value::CqlTimestamp;
 use std::fmt;
+use std::time::Duration;
 
 /// A struct representing a timestamp of a stream generation.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct GenerationTimestamp {
-    pub(crate) timestamp: chrono::Duration,
+    pub(crate) timestamp: Duration,
 }
 
 impl fmt::Display for GenerationTimestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.timestamp.num_milliseconds())
+        write!(f, "{}", self.timestamp.as_millis())
     }
 }
 
@@ -25,7 +26,7 @@ impl SerializeValue for GenerationTimestamp {
         typ: &ColumnType,
         writer: CellWriter<'b>,
     ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        CqlTimestamp(self.timestamp.num_milliseconds()).serialize(typ, writer)
+        CqlTimestamp(self.timestamp.as_millis() as i64).serialize(typ, writer)
     }
 }
 
@@ -41,7 +42,7 @@ impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for GenerationTimest
         let timestamp = <CqlTimestamp as DeserializeValue<'frame, 'metadata>>::deserialize(typ, v)?;
 
         Ok(GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(timestamp.0),
+            timestamp: Duration::from_millis(timestamp.0 as u64),
         })
     }
 }

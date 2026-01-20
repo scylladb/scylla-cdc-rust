@@ -2,7 +2,7 @@
 
 use std::cmp::{max, min};
 use std::sync::Arc;
-use std::time;
+use std::time::{self, Duration};
 
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -26,14 +26,14 @@ const TIMEOUT_FACTOR: u128 = 2;
 
 #[derive(Clone)]
 pub struct CDCReaderConfig {
-    pub lower_timestamp: chrono::Duration,
-    pub window_size: time::Duration,
-    pub safety_interval: time::Duration,
-    pub sleep_interval: time::Duration,
+    pub lower_timestamp: Duration,
+    pub window_size: Duration,
+    pub safety_interval: Duration,
+    pub sleep_interval: Duration,
     pub should_load_progress: bool,
     pub should_save_progress: bool,
     pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
-    pub pause_between_saves: time::Duration,
+    pub pause_between_saves: Duration,
 }
 
 /// A wrapper for `Session` objects used to make mocking the Session possible.
@@ -78,7 +78,7 @@ impl StreamSession for Session {
 pub struct StreamReader {
     session: Arc<dyn StreamSession>,
     stream_id_vec: Vec<StreamID>,
-    upper_timestamp: tokio::sync::Mutex<Option<chrono::Duration>>,
+    upper_timestamp: tokio::sync::Mutex<Option<Duration>>,
     config: CDCReaderConfig,
 }
 
@@ -96,7 +96,7 @@ impl StreamReader {
         }
     }
 
-    pub async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
+    pub async fn set_upper_timestamp(&self, new_upper_timestamp: Duration) {
         let mut guard = self.upper_timestamp.lock().await;
         *guard = Some(new_upper_timestamp);
     }
@@ -115,10 +115,10 @@ impl StreamReader {
         );
         let query_base = self.session.prepare_statement(query).await?;
         let mut window_begin = self.config.lower_timestamp;
-        let window_size = chrono::Duration::from_std(self.config.window_size)?;
-        let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
+        let window_size = self.config.window_size;
+        let safety_interval = self.config.safety_interval;
         let mut checkpoint = Checkpoint {
-            timestamp: window_begin.to_std()?,
+            timestamp: window_begin,
             stream_id: self.stream_id_vec[0].clone(),
             generation: GenerationTimestamp {
                 timestamp: window_begin,
@@ -127,7 +127,7 @@ impl StreamReader {
         let (sender, receiver) = watch::channel(checkpoint.clone());
 
         if self.config.should_load_progress {
-            let mut loaded_timestamp = chrono::Duration::MAX;
+            let mut loaded_timestamp = Duration::MAX;
             for stream in &self.stream_id_vec {
                 if let Some(timestamp) = self
                     .config
@@ -140,7 +140,7 @@ impl StreamReader {
                     loaded_timestamp = min(timestamp, loaded_timestamp);
                 }
             }
-            if loaded_timestamp != chrono::Duration::MAX {
+            if loaded_timestamp != Duration::MAX {
                 window_begin = max(window_begin, loaded_timestamp);
             }
         }
@@ -157,7 +157,7 @@ impl StreamReader {
 
         loop {
             let now_timestamp =
-                chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+                Duration::from_millis(chrono::Local::now().timestamp_millis() as u64);
             let window_end = max(
                 window_begin,
                 min(window_begin + window_size, now_timestamp - safety_interval),
@@ -166,8 +166,8 @@ impl StreamReader {
             self.fetch_and_consume_rows(
                 &query_base,
                 &mut consumer,
-                value::CqlTimestamp(window_begin.num_milliseconds()),
-                value::CqlTimestamp(window_end.num_milliseconds()),
+                value::CqlTimestamp(window_begin.as_millis() as i64),
+                value::CqlTimestamp(window_end.as_millis() as i64),
             )
             .await?;
 
@@ -178,7 +178,7 @@ impl StreamReader {
             }
 
             window_begin = window_end;
-            checkpoint.timestamp = window_begin.to_std()?;
+            checkpoint.timestamp = window_begin;
             sender.send(checkpoint.clone())?;
             sleep(self.config.sleep_interval).await;
         }
@@ -318,10 +318,10 @@ mod tests {
         fn test_new(
             session: &Arc<Session>,
             stream_ids: Vec<StreamID>,
-            start_timestamp: chrono::Duration,
-            window_size: time::Duration,
-            safety_interval: time::Duration,
-            sleep_interval: time::Duration,
+            start_timestamp: Duration,
+            window_size: Duration,
+            safety_interval: Duration,
+            sleep_interval: Duration,
         ) -> StreamReader {
             let config = CDCReaderConfig {
                 lower_timestamp: start_timestamp,
@@ -346,10 +346,10 @@ mod tests {
     async fn get_test_stream_reader(session: &Arc<Session>) -> anyhow::Result<StreamReader> {
         let stream_id_vec = get_cdc_stream_id(session).await?;
 
-        let start_timestamp = now() - chrono::Duration::seconds(START_TIME_DELAY_IN_SECONDS);
-        let sleep_interval = time::Duration::from_millis(SLEEP_INTERVAL);
-        let window_size = time::Duration::from_millis(WINDOW_SIZE);
-        let safety_interval = time::Duration::from_millis(SAFETY_INTERVAL);
+        let start_timestamp = now() - Duration::from_secs(START_TIME_DELAY_IN_SECONDS as u64);
+        let sleep_interval = Duration::from_millis(SLEEP_INTERVAL);
+        let window_size = Duration::from_millis(WINDOW_SIZE);
+        let safety_interval = Duration::from_millis(SAFETY_INTERVAL);
 
         let reader = StreamReader::test_new(
             session,
@@ -461,7 +461,7 @@ mod tests {
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
         cdc_reader
-            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .set_upper_timestamp(now() + Duration::from_secs(1))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
@@ -516,7 +516,7 @@ mod tests {
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
         cdc_reader
-            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .set_upper_timestamp(now() + Duration::from_secs(1))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
@@ -549,8 +549,9 @@ mod tests {
             TEST_TABLE, 0, 0, "val0", "static0"
         ));
         let second_ago = chrono::Local::now() - chrono::Duration::seconds(1);
-        let second_ago_timestamp = chrono::Duration::milliseconds(second_ago.timestamp_millis());
-        insert_before_upper_timestamp_query.set_timestamp(second_ago_timestamp.num_microseconds());
+        let second_ago_timestamp = Duration::from_millis(second_ago.timestamp_millis() as u64);
+        insert_before_upper_timestamp_query
+            .set_timestamp(Some(second_ago_timestamp.as_micros() as i64));
         shared_session
             .query_unpaged(insert_before_upper_timestamp_query, ())
             .await
@@ -564,9 +565,9 @@ mod tests {
             TEST_TABLE, 0, 1, "val1", "static1"
         ));
         let second_later = chrono::Local::now() + chrono::Duration::seconds(1);
-        let second_later_timestamp =
-            chrono::Duration::milliseconds(second_later.timestamp_millis());
-        insert_after_upper_timestamp_query.set_timestamp(second_later_timestamp.num_microseconds());
+        let second_later_timestamp = Duration::from_millis(second_later.timestamp_millis() as u64);
+        insert_after_upper_timestamp_query
+            .set_timestamp(Some(second_later_timestamp.as_micros() as i64));
         shared_session
             .query_unpaged(insert_after_upper_timestamp_query, ())
             .await
@@ -612,7 +613,7 @@ mod tests {
         // (maximal wait time in backoff is equal to sleep_interval).
         cdc_reader.config.sleep_interval = time::Duration::from_millis(1500);
         cdc_reader
-            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .set_upper_timestamp(now() + Duration::from_secs(1))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
