@@ -22,6 +22,7 @@ use futures::FutureExt;
 use futures::future::RemoteHandle;
 use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
 use scylla::client::session::Session;
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
@@ -94,7 +95,15 @@ struct CDCReaderWorker {
 }
 
 impl CDCReaderWorker {
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    /// Spawns the CDC log reader worker for every stream for the given keyspace and table, configured in this struct.
+    /// It updates the stream readers upon a new generation being available.
+    ///
+    /// Finishes when we encounter an error or when the end timestamp is reached. The timestamp can be updated,
+    /// with the tokio sender inside [`CDCLogReader`](self::CDCLogReader),
+    /// which was created alongside this worker inside a [`CDCLogReaderBuilder`](self::CDCLogReaderBuilder).
+    /// After encountering first errors, all stream readers are gracefully stopped.
+    /// If multiple errors were encountered, only the first one is returned and the following errors are logged at WARNING level.
+    async fn run(&mut self) -> anyhow::Result<()> {
         let fetcher = get_generation_fetcher(
             &self.session,
             &self.keyspace,
@@ -110,120 +119,141 @@ impl CDCReaderWorker {
 
         let mut next_generation: Option<GenerationTimestamp> = None;
         let mut current_generation: Option<GenerationTimestamp> = None;
-        let mut err: Option<anyhow::Error> = None;
 
         let mut reader_config = self.config.clone();
 
         loop {
             tokio::select! {
                 Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated() => {
-                    match evt {
-                        Err(error) => {
-                            err = Some(anyhow::Error::new(error));
-                            self.stop_now().await;
+                    let err = match evt {
+                        Err(error) => Some(anyhow::Error::new(error)),
+                        Ok(Err(error)) => Some(error),
+                        _ => None
+                    };
+                    if let Some(err) = err {
+                        self.stop_now().await;
+                        // We only need to wait for other tasks to finish, we can ignore
+                        // any changes to the generation_receiver or end_timestamp_receiver
+                        while !stream_reader_tasks.is_empty() {
+                            match stream_reader_tasks.next().await {
+                                Some(Err(e)) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader task panicked: {:#}", e),
+                                Some(Ok(Err(e))) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader returned an error: {:#}", e),
+                                None | Some(Ok(Ok(_)))=> {},
+                            };
                         }
-                        Ok(Err(error)) => {
-                            err = Some(error);
-                            self.stop_now().await;
-                        },
-                        _ => {}
+                        return Err(err);
                     }
                 }
-                Some(generation) = generation_receiver.recv(), if next_generation.is_none() && err.is_none() => {
+                Some(generation) = generation_receiver.recv(), if next_generation.is_none() => {
                     next_generation = Some(generation.clone());
                     self.set_upper_timestamp(generation.timestamp).await;
                 }
-                Ok(_) = self.end_timestamp_receiver.changed(), if err.is_none() => {
+                Ok(_) = self.end_timestamp_receiver.changed() => {
                     let timestamp = *self.end_timestamp_receiver.borrow_and_update();
                     self.end_timestamp = timestamp;
                     self.set_upper_timestamp(timestamp).await;
                 }
             }
 
-            if stream_reader_tasks.is_empty() {
-                if let Some(err) = err {
-                    return Err(err);
+            if !stream_reader_tasks.is_empty() {
+                continue;
+            }
+
+            // We make changes to the stream readers related to generation changes,
+            // only when all of the current stream readers have finished their work.
+            // When we encounter a new generation, all streams are closed, by setting
+            // their upper timestamp to the generation's timestamp.
+            // Because this is not instant, this means we must wait for all stream readers to finish.
+            // If for some reason this will take a long time (for example the connection has closed,
+            // and we need to wait for the timeout), the opening of streams for the new generation
+            // will be delayed. On the other hand, we still may receive some important updates from
+            // the current generation.
+            //
+            // One option would be to open streams for the new generation while we still wait for the
+            // current generation's streams to close. To consider doing this, we would not break
+            // any guarantees, by proving messages from old generation after new generation's messages.
+
+            if let Some(generation) = next_generation.take() {
+                current_generation = Some(generation.clone());
+                if generation.timestamp > self.end_timestamp {
+                    return Ok(());
                 }
 
-                if let Some(generation) = next_generation.take() {
-                    current_generation = Some(generation.clone());
-                    if generation.timestamp > self.end_timestamp {
-                        return Ok(());
-                    }
+                if self.config.should_save_progress {
+                    self.config
+                        .checkpoint_saver
+                        .as_ref()
+                        .unwrap()
+                        .save_new_generation(&generation)
+                        .await?;
+                }
 
-                    if self.config.should_save_progress {
-                        self.config
-                            .checkpoint_saver
-                            .as_ref()
-                            .unwrap()
-                            .save_new_generation(&generation)
-                            .await?;
-                    }
+                reader_config.lower_timestamp =
+                    max(self.config.lower_timestamp, generation.timestamp);
 
-                    reader_config.lower_timestamp =
-                        max(self.config.lower_timestamp, generation.timestamp);
+                self.readers = fetcher
+                    .fetch_stream_ids(&generation)
+                    .await?
+                    .into_iter()
+                    .map(|stream_ids| {
+                        Arc::new(StreamReader::new(
+                            &self.session,
+                            stream_ids,
+                            reader_config.clone(),
+                        ))
+                    })
+                    .collect();
 
-                    self.readers = fetcher
-                        .fetch_stream_ids(&generation)
-                        .await?
-                        .into_iter()
-                        .map(|stream_ids| {
-                            Arc::new(StreamReader::new(
-                                &self.session,
-                                stream_ids,
-                                reader_config.clone(),
-                            ))
+                self.set_upper_timestamp(self.end_timestamp).await;
+
+                let spawn_new_cdc_fetcher =
+                    |reader: &Arc<StreamReader>| -> JoinHandle<anyhow::Result<()>> {
+                        let reader = Arc::clone(reader);
+                        let keyspace = self.keyspace.clone();
+                        let table_name = self.table_name.clone();
+                        let factory = Arc::clone(&self.consumer_factory);
+                        tokio::spawn(async move {
+                            let consumer = factory.new_consumer().await;
+                            reader.fetch_cdc(keyspace, table_name, consumer).await
                         })
-                        .collect();
+                    };
 
-                    self.set_upper_timestamp(self.end_timestamp).await;
-
-                    stream_reader_tasks = self
-                        .readers
-                        .iter()
-                        .map(|reader| {
-                            let reader = Arc::clone(reader);
-                            let keyspace = self.keyspace.clone();
-                            let table_name = self.table_name.clone();
-                            let factory = Arc::clone(&self.consumer_factory);
-                            tokio::spawn(async move {
-                                let consumer = factory.new_consumer().await;
-                                reader.fetch_cdc(keyspace, table_name, consumer).await
-                            })
-                        })
-                        .collect();
-                } else if let Some(current) = current_generation.take() {
-                    if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
-                        if generation.timestamp <= self.end_timestamp {
-                            // Fetched next generation with lower or equal timestamp than end_timestamp
-                            next_generation = Some(generation.clone());
-                            self.set_upper_timestamp(generation.timestamp).await;
-                            continue;
-                        } else {
-                            // Fetched next generation with bigger timestamp than end_timestamp
-                            return Ok(());
-                        }
+                // Spawn a task for each stream reader to fetch CDC rows
+                stream_reader_tasks = self.readers.iter().map(spawn_new_cdc_fetcher).collect();
+            } else if let Some(current) = current_generation.take() {
+                if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
+                    if generation.timestamp <= self.end_timestamp {
+                        // Fetched next generation with lower or equal timestamp than end_timestamp
+                        next_generation = Some(generation.clone());
+                        self.set_upper_timestamp(generation.timestamp).await;
+                        continue;
                     } else {
-                        // Current generation's next generation is not available
-                        warn!(
-                            "Next generation is not available, some rows in the CDC log table may be unread."
-                        );
+                        // Fetched next generation with bigger timestamp than end_timestamp
                         return Ok(());
                     }
                 } else {
-                    // First generation is not fetched
+                    // Current generation's next generation is not available
+                    warn!(
+                        "Next generation is not available, some rows in the CDC log table may be unread."
+                    );
                     return Ok(());
                 }
+            } else {
+                // First generation is not fetched
+                return Ok(());
             }
         }
     }
 
+    /// Updates all of the readers with the new upper timestamp.
+    /// When the timestamp is reached, the readers will stop after finishing the current request.
     async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
         for reader in self.readers.iter() {
             reader.set_upper_timestamp(new_upper_timestamp).await;
         }
     }
 
+    /// Updates all of the readers with the timestamp in the past, causing them to stop as soon as the current request finishes.
     async fn stop_now(&self) {
         self.set_upper_timestamp(chrono::Duration::MIN).await;
     }

@@ -96,11 +96,20 @@ impl StreamReader {
         }
     }
 
+    /// Sets the upper timestamp for the reader.
+    /// The [`fetch_cdc`](Self::fetch_cdc) method will stop when this timestamp is reached.
+    /// You can update this timestamp even while the [`fetch_cdc`](Self::fetch_cdc) method is running.
     pub async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
         let mut guard = self.upper_timestamp.lock().await;
         *guard = Some(new_upper_timestamp);
     }
 
+    /// Continuously fetches CDC rows from the specified keyspace.table and passes them to the provided consumer.
+    /// This function returns when the upper timestamp is reached or an error other than the timeout occurs.
+    /// By default the upper timestamp is not set, so the function continues indefinitely.
+    /// You can set it using the [`set_upper_timestamp`](Self::set_upper_timestamp) method.
+    ///
+    /// When the request to the database fails due to timeout, it continues retrying with exponential backoff.
     pub async fn fetch_cdc(
         &self,
         keyspace: String,
@@ -195,6 +204,8 @@ impl StreamReader {
         Ok(())
     }
 
+    /// Attempts to execute statement fetching all pages of CDC rows for the given time window.
+    /// In case of timeouts, it retries with exponential backoff.
     async fn fetch_and_consume_rows(
         &self,
         query_base: &PreparedStatement,
@@ -249,6 +260,9 @@ impl StreamReader {
                         page_no,
                     )
                     .await;
+                    // Waiting here is a bit suboptimal, as if this happens after generation change,
+                    // we will still sleep, slowing down the process of opening streams for new generation.
+                    // Those streams will be opened only after all instances of fetch_cdc return.
                     sleep(time::Duration::from_millis(sleep_after_timeout as u64)).await;
                     sleep_after_timeout *= TIMEOUT_FACTOR;
                     if sleep_after_timeout >= self.config.sleep_interval.as_millis() {
