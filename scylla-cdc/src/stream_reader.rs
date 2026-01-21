@@ -15,7 +15,7 @@ use scylla::value;
 use scylla::value::Row;
 use tokio::sync::watch;
 use tokio::time::sleep;
-use tracing::{enabled, warn};
+use tracing::{enabled, error, info, warn};
 
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
@@ -129,6 +129,7 @@ impl StreamReader {
         };
 
         let mut window_begin = self.config.lower_timestamp;
+        // This is nonnegative because `self.config.window_size` is `std::time::Duration`.
         let window_size = chrono::Duration::from_std(self.config.window_size)?;
         let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
         let mut checkpoint = Checkpoint {
@@ -169,13 +170,76 @@ impl StreamReader {
             );
         }
 
+        let mut now_timestamp =
+            chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+        // Calculate the timestamp until which it is safe to read.
+        // We should not read data newer than (now - `safety_interval`),
+        // because clock drift and various kinds of latency may influence too recent results.
+        let mut safe_to_read_until = now_timestamp - safety_interval;
+
+        // The first `window_begin` is set by the user (or loaded from checkpoint).
+        if window_begin > safe_to_read_until {
+            // If it is too close to the current time, we wait until we can start reading.
+            // This is done to prevent errors such as reading out-of-order changes, or skipping some changes.
+            if window_begin > now_timestamp {
+                // If it it's in the future, we issue an error message to make it clear that wrong timestamp was set up as `window_begin`.
+                // Then we wait before starting to read, to satisfy safety interval.
+                error!(
+                    requested_begin_ms_timestamp = window_begin.num_milliseconds(),
+                    current_ms_timestamp = now_timestamp.num_milliseconds(),
+                    "Provided `CDCReaderConfig::lower_timestamp` that was in the future!\
+                    Ensure that the start timestamp is not set in the future or you have a valid checkpoint state.\
+                    The CDC readers will wait up to `CDCReaderConfig::safety_interval` before starting to read data."
+                );
+            } else {
+                // If it does not respect safety interval BUT is still in the past, we inform about it.
+                // This may happen if we start from "now" without any checkpoint.
+                // Then we wait before starting to read, to satisfy safety interval.
+                // This is done also not to require user to think about safety interval when setting start timestamp.
+                info!(
+                    requested_begin_ms_timestamp = window_begin.num_milliseconds(),
+                    current_ms_timestamp = now_timestamp.num_milliseconds(),
+                    safety_interval_ms = safety_interval.num_milliseconds(),
+                    "Provided `CDCReaderConfig::lower_timestamp` that was in a too recent past; it did not include safety interval.\
+                    This is expected and minor issue if you provided NOW as the `CDCReaderConfig::lower_timestamp` timestamp.\
+                    The CDC readers will wait up to `CDCReaderConfig::safety_interval` before starting to read data."
+                );
+            }
+            sleep(
+                (window_begin - safe_to_read_until).to_std()?
+                    // Adding a small buffer to ensure we are past the safety interval, not exactly at its edge.
+                    // This is to avoid issues with clock precision.
+                    + Duration::from_millis(100),
+            )
+            .await;
+        }
+
         loop {
-            let now_timestamp =
-                chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
-            let window_end = max(
-                window_begin,
-                min(window_begin + window_size, now_timestamp - safety_interval),
-            );
+            now_timestamp = chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+            safe_to_read_until = now_timestamp - safety_interval;
+
+            // The only possible way for this to happen is when the current `now_timestamp` is less than the previous `now_timestamp`.
+            // This is because we possibly waited before the loop to ensure `window_begin <= safe_to_read_until`.
+            // This means TIME TRAVEL! But still we have to handle it gracefully.
+            // In this case, we again wait until the time is safe to read.
+            if window_begin > safe_to_read_until {
+                error!(
+                    last_request_end_ms = window_begin.num_milliseconds(),
+                    current_timestamp_ms = now_timestamp.num_milliseconds(),
+                    expected_window_end_ms = safe_to_read_until.num_milliseconds(),
+                    "The current time broke the monotonicity when creating a CDC request. Ensure the system clock is stable, and is within the safety interval of the database clock."
+                );
+                sleep(
+                    (window_begin - safe_to_read_until).to_std()?
+                        // Adding a small buffer to ensure we are past the safety interval, not exactly at its edge.
+                        // This is to avoid issues with clock precision.
+                        + Duration::from_millis(100),
+                )
+                .await;
+            }
+
+            // Ask for windows no larger that `window_size`, but also ensure we respect the safety interval.
+            let window_end = std::cmp::min(window_begin + window_size, safe_to_read_until);
 
             self.fetch_and_consume_rows(
                 &query_base,
