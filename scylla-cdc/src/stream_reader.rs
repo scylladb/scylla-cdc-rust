@@ -329,7 +329,7 @@ impl StreamReader {
                     // especially this CDC is the part of the problem (remember that we may have a few hundred streamIDs - and as a result
                     // create a few hundred requests to the database at a single moment).
                     if is_transient_error(&err) {
-                        self.print_timeout_warning(
+                        self.print_request_failure_warning(
                             &window_begin,
                             &window_end,
                             sleep_after_timeout,
@@ -357,7 +357,7 @@ impl StreamReader {
         Ok(())
     }
 
-    async fn print_timeout_warning(
+    async fn print_request_failure_warning(
         &self,
         window_begin: &value::CqlTimestamp,
         window_end: &value::CqlTimestamp,
@@ -379,7 +379,7 @@ impl StreamReader {
                 page_no = page_no,
                 current_backoff_ms = backoff.as_millis(),
                 driver_error = format!("{:#}", driver_error),
-                "Timeout while fetching CDC rows."
+                "Encountered a transient error while fetching CDC rows."
             );
         }
     }
