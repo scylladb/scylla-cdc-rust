@@ -443,7 +443,7 @@ impl StreamReader {
                 window_end_ms = window_end.0,
                 page_no = page_no,
                 current_backoff_ms = backoff.as_millis(),
-                driver_error = format!("{:#}", driver_error),
+                driver_error = format_args!("{:#}", driver_error),
                 "Encountered a transient error while fetching CDC rows."
             );
         }
