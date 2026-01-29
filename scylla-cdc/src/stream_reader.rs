@@ -305,6 +305,7 @@ impl StreamReader {
                         + Duration::from_millis(100),
                 )
                 .await;
+                continue;
             }
 
             // Ask for windows no larger that `window_size`, but also ensure we respect the safety interval.
