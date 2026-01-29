@@ -17,7 +17,7 @@ use scylla::value;
 use scylla::value::Row;
 use tokio::sync::watch;
 use tokio::time::sleep;
-use tracing::{enabled, error, info, warn};
+use tracing::{debug, enabled, error, warn};
 
 use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
@@ -265,7 +265,9 @@ impl StreamReader {
                 // This may happen if we start from "now" without any checkpoint.
                 // Then we wait before starting to read, to satisfy safety interval.
                 // This is done also not to require user to think about safety interval when setting start timestamp.
-                info!(
+                //
+                // TODO: consider making this log print rate-limited, because there were reports of this being too spammy.
+                debug!(
                     requested_begin_ms_timestamp = window_begin.num_milliseconds(),
                     current_ms_timestamp = now_timestamp.num_milliseconds(),
                     safety_interval_ms = safety_interval.num_milliseconds(),
