@@ -24,6 +24,20 @@ use crate::cdc_types::{GenerationTimestamp, StreamID};
 use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
 use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 
+/// Sink that receives the per-stream consumed-window high-water mark after each window completes.
+///
+/// The reported value is the `window_begin` of the *next* window to be fetched —
+/// i.e., all CDC rows with `cdc$time < reported_value` have been consumed by this stream reader.
+///
+/// The value is encoded as a `chrono::Duration` representing unix time (milliseconds since epoch).
+/// The sentinel `chrono::Duration::MIN` means no window has completed yet.
+///
+/// This is an internal interface; external callers observe the aggregated minimum via
+/// [`CDCLogReader::window_progress`](crate::log_reader::CDCLogReader::window_progress).
+pub(crate) trait StreamProgress: Send + Sync {
+    fn report(&self, consumed_boundary: chrono::Duration);
+}
+
 const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 const TIMEOUT_FACTOR: u32 = 2;
 
@@ -37,6 +51,10 @@ pub struct CDCReaderConfig {
     pub should_save_progress: bool,
     pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
     pub pause_between_saves: time::Duration,
+    /// When set, each completed window boundary is pushed here so the log-reader worker
+    /// can aggregate per-stream progress into a global high-water mark.
+    /// Set by `CDCReaderWorker`; leave `None` when constructing `StreamReader` manually.
+    pub(crate) window_progress: Option<Arc<dyn StreamProgress>>,
 }
 
 /// A wrapper for `Session` objects used to make mocking the Session possible.
@@ -327,12 +345,21 @@ impl StreamReader {
             if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref()
                 && window_end >= *timestamp_to_stop
             {
+                // Publish the final consumed boundary on clean exit so the aggregator always
+                // sees the true high-water mark for the last (partial) iteration.
+                if let Some(reporter) = &self.config.window_progress {
+                    reporter.report(window_end);
+                }
                 break;
             }
 
             window_begin = window_end;
             checkpoint.timestamp = window_begin.to_std()?;
             sender.send(checkpoint.clone())?;
+            // Publish per-stream progress so the log-reader worker can compute the global minimum.
+            if let Some(reporter) = &self.config.window_progress {
+                reporter.report(window_begin);
+            }
             sleep(self.config.sleep_interval).await;
         }
 
@@ -495,6 +522,7 @@ mod tests {
                 should_save_progress: false,
                 checkpoint_saver: None,
                 pause_between_saves: Default::default(),
+                window_progress: None,
             };
 
             StreamReader {
