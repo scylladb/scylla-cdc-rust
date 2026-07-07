@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use futures::FutureExt;
+use futures::TryStreamExt;
+use futures::future::RemoteHandle;
 use futures::stream::StreamExt;
-use futures::{TryStreamExt, future::RemoteHandle};
 use scylla::client::session::Session;
 use scylla::statement::Consistency;
 use scylla::statement::unprepared::Statement;
@@ -12,7 +13,9 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::warn;
 
-use crate::cdc_types::{GenerationTimestamp, StreamID, make_idempotent_statement};
+use crate::cdc_types::GenerationTimestamp;
+use crate::cdc_types::StreamID;
+use crate::cdc_types::make_idempotent_statement;
 
 /// Component responsible for managing stream generations.
 #[async_trait]

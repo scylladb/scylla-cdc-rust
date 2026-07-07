@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;

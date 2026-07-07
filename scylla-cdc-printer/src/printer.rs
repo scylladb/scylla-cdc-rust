@@ -2,7 +2,9 @@ use anyhow;
 use async_trait::async_trait;
 use chrono::DateTime;
 
-use scylla_cdc::consumer::{CDCRow, Consumer, ConsumerFactory};
+use scylla_cdc::consumer::CDCRow;
+use scylla_cdc::consumer::Consumer;
+use scylla_cdc::consumer::ConsumerFactory;
 
 const OUTPUT_WIDTH: i64 = 72;
 
@@ -115,7 +117,10 @@ mod tests {
     use std::time;
 
     use scylla_cdc::log_reader::CDCLogReaderBuilder;
-    use scylla_cdc_test_utils::{TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db};
+    use scylla_cdc_test_utils::TEST_TABLE;
+    use scylla_cdc_test_utils::now;
+    use scylla_cdc_test_utils::populate_simple_db_with_pk;
+    use scylla_cdc_test_utils::prepare_simple_db;
 
     use super::*;
 

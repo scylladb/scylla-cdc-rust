@@ -1,6 +1,8 @@
 //! A module representing the logic behind saving progress.
 use crate::CqlIdentifier;
-use crate::cdc_types::{GenerationTimestamp, StreamID, make_idempotent_statement};
+use crate::cdc_types::GenerationTimestamp;
+use crate::cdc_types::StreamID;
+use crate::cdc_types::make_idempotent_statement;
 use anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -229,13 +231,18 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 
 #[cfg(test)]
 mod tests {
-    use crate::cdc_types::{GenerationTimestamp, StreamID};
-    use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, TableBackedCheckpointSaver};
-    use futures::{StreamExt, TryStreamExt};
+    use crate::cdc_types::GenerationTimestamp;
+    use crate::cdc_types::StreamID;
+    use crate::checkpoints::CDCCheckpointSaver;
+    use crate::checkpoints::Checkpoint;
+    use crate::checkpoints::TableBackedCheckpointSaver;
+    use futures::StreamExt;
+    use futures::TryStreamExt;
     use rand::prelude::*;
     use scylla::client::session::Session;
     use scylla::value;
-    use scylla_cdc_test_utils::{prepare_db, unique_name};
+    use scylla_cdc_test_utils::prepare_db;
+    use scylla_cdc_test_utils::unique_name;
     use std::ops::Add;
     use std::sync::Arc;
     use std::time::Duration;

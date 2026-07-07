@@ -1,16 +1,21 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::client::session::Session;
-use scylla::cluster::metadata::{CollectionType, ColumnKind, ColumnType, Table};
+use scylla::cluster::metadata::CollectionType;
+use scylla::cluster::metadata::ColumnKind;
+use scylla::cluster::metadata::ColumnType;
+use scylla::cluster::metadata::Table;
 use scylla::serialize::row::SerializeRow;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::statement::unprepared::Statement;
 use scylla::value::CqlValue;
-use scylla::value::CqlValue::{Map, Set};
+use scylla::value::CqlValue::Map;
+use scylla::value::CqlValue::Set;
 use thiserror::Error;
 use tracing::warn;
 

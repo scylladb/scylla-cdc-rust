@@ -20,16 +20,20 @@ use std::time::SystemTime;
 use anyhow;
 use futures::FutureExt;
 use futures::future::RemoteHandle;
-use futures::stream::{FusedStream, FuturesUnordered, StreamExt};
+use futures::stream::FusedStream;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 use scylla::client::session::Session;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::cdc_types::{GenerationTimestamp, make_idempotent_statement};
+use crate::cdc_types::GenerationTimestamp;
+use crate::cdc_types::make_idempotent_statement;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
 use crate::stream_generations::get_generation_fetcher;
-use crate::stream_reader::{CDCReaderConfig, StreamReader};
+use crate::stream_reader::CDCReaderConfig;
+use crate::stream_reader::StreamReader;
 
 const SECOND_IN_MILLIS: i64 = 1_000;
 const DEFAULT_SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS * 10;
@@ -562,11 +566,16 @@ mod tests {
     use std::sync::atomic::Ordering::Relaxed;
     use std::time::Duration;
 
-    use crate::consumer::{CDCRow, Consumer, ConsumerFactory};
+    use crate::consumer::CDCRow;
+    use crate::consumer::Consumer;
+    use crate::consumer::ConsumerFactory;
     use crate::log_reader::CDCLogReaderBuilder;
     use anyhow::anyhow;
     use async_trait::async_trait;
-    use scylla_cdc_test_utils::{TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db};
+    use scylla_cdc_test_utils::TEST_TABLE;
+    use scylla_cdc_test_utils::now;
+    use scylla_cdc_test_utils::populate_simple_db_with_pk;
+    use scylla_cdc_test_utils::prepare_simple_db;
 
     struct ErrorConsumer {
         id: usize,
