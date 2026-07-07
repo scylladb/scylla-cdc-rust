@@ -14,8 +14,7 @@
 
 use std::cmp::max;
 use std::sync::Arc;
-use std::time;
-use std::time::SystemTime;
+use std::time::{self, Duration, SystemTime};
 
 use anyhow;
 use futures::FutureExt;
@@ -48,8 +47,8 @@ const DEFAULT_PAUSE: u64 = 10;
 /// `notify` semaphore, reads all slots, and forwards `min(positions)` to the global
 /// `watch` channel exposed on [`CDCLogReader`].
 struct GenerationProgress {
-    /// Per-reader consumed window boundary.  Initialized to `chrono::Duration::MIN` (sentinel).
-    positions: std::sync::Mutex<Vec<chrono::Duration>>,
+    /// Per-reader consumed window boundary.  Initialized to `Duration::ZERO` (sentinel).
+    positions: std::sync::Mutex<Vec<Duration>>,
     /// Fires (at least once) after any slot is updated, waking the aggregation task.
     notify: tokio::sync::Notify,
 }
@@ -57,7 +56,7 @@ struct GenerationProgress {
 impl GenerationProgress {
     fn new(num_readers: usize) -> Arc<Self> {
         Arc::new(Self {
-            positions: std::sync::Mutex::new(vec![chrono::Duration::MIN; num_readers]),
+            positions: std::sync::Mutex::new(vec![Duration::ZERO; num_readers]),
             notify: tokio::sync::Notify::new(),
         })
     }
@@ -73,7 +72,7 @@ struct PerStreamProgressReporter {
 }
 
 impl StreamProgress for PerStreamProgressReporter {
-    fn report(&self, pos: chrono::Duration) {
+    fn report(&self, pos: Duration) {
         {
             let mut positions = self.state.positions.lock().unwrap();
             positions[self.slot] = pos;
@@ -86,7 +85,7 @@ impl StreamProgress for PerStreamProgressReporter {
 /// the global `window_progress_tx`.  Runs until aborted (on generation change or worker exit).
 async fn run_progress_aggregator(
     state: Arc<GenerationProgress>,
-    global_tx: tokio::sync::watch::Sender<chrono::Duration>,
+    global_tx: tokio::sync::watch::Sender<Duration>,
 ) {
     loop {
         state.notify.notified().await;
@@ -97,7 +96,7 @@ async fn run_progress_aggregator(
             .iter()
             .copied()
             .min()
-            .unwrap_or(chrono::Duration::MIN);
+            .unwrap_or(Duration::ZERO);
         if global_tx.send(min).is_err() {
             // No receivers left — CDCLogReader was dropped.
             break;
@@ -114,17 +113,18 @@ pub struct CDCLogReader {
     /// Receives the global consumed-window high-water mark (min across all active streams).
     ///
     /// Value semantics:
-    /// * The value is unix time encoded as `chrono::Duration` (milliseconds since epoch).
+    /// * The value is unix time encoded as [`std::time::Duration`] (consistent with PR #150
+    ///   which replaces all `chrono::Duration` in the public API with `std::time::Duration`).
     /// * A healthy reader advances this toward `now − safety_interval` as windows complete.
-    /// * `chrono::Duration::MIN` is the sentinel published before the first window completes
+    /// * [`Duration::ZERO`] is the sentinel published before the first window completes
     ///   and immediately after every generation transition.
-    window_progress_rx: tokio::sync::watch::Receiver<chrono::Duration>,
+    window_progress_rx: tokio::sync::watch::Receiver<Duration>,
 }
 
 impl CDCLogReader {
     fn new(
         end_timestamp: tokio::sync::watch::Sender<chrono::Duration>,
-        window_progress_rx: tokio::sync::watch::Receiver<chrono::Duration>,
+        window_progress_rx: tokio::sync::watch::Receiver<Duration>,
     ) -> Self {
         CDCLogReader {
             end_timestamp,
@@ -145,14 +145,14 @@ impl CDCLogReader {
     /// Returns a cloned [`tokio::sync::watch::Receiver`] that tracks the global
     /// consumed-window high-water mark.
     ///
-    /// The value is the unix-time (as [`chrono::Duration`]) of `min(window_begin)` across
+    /// The value is unix time as [`std::time::Duration`] of `min(window_begin)` across
     /// all currently active stream readers.  In steady state a healthy reader advances it
     /// toward `now − safety_interval`.
     ///
-    /// The sentinel `chrono::Duration::MIN` is emitted:
+    /// [`Duration::ZERO`] is the sentinel emitted:
     /// * before the first window has completed across all streams, and
     /// * immediately after every generation transition (reader-set rebuild).
-    pub fn window_progress(&self) -> tokio::sync::watch::Receiver<chrono::Duration> {
+    pub fn window_progress(&self) -> tokio::sync::watch::Receiver<Duration> {
         self.window_progress_rx.clone()
     }
 
@@ -191,7 +191,7 @@ struct CDCReaderWorker {
     config: CDCReaderConfig,
     uses_tablets: bool,
     /// Sender side of the global window-progress watch channel.
-    window_progress_tx: tokio::sync::watch::Sender<chrono::Duration>,
+    window_progress_tx: tokio::sync::watch::Sender<Duration>,
     /// Handle for the currently-running per-generation progress aggregation task.
     /// Aborted on generation transitions and when the worker is dropped.
     aggregation_handle: Option<JoinHandle<()>>,
@@ -310,7 +310,7 @@ impl CDCReaderWorker {
                     handle.abort();
                 }
                 // Publish the sentinel so consumers know a generation transition happened.
-                let _ = self.window_progress_tx.send(chrono::Duration::MIN);
+                let _ = self.window_progress_tx.send(Duration::ZERO);
 
                 let stream_id_groups = fetcher.fetch_stream_ids(&generation).await?;
                 let num_readers = stream_id_groups.len();
@@ -635,9 +635,9 @@ impl CDCLogReaderBuilder {
         let readers = vec![];
 
         // Global window-progress channel.  Initialised to the sentinel so callers see
-        // chrono::Duration::MIN until the first window completes.
+        // Duration::ZERO until the first window completes.
         let (window_progress_tx, window_progress_rx) =
-            tokio::sync::watch::channel(chrono::Duration::MIN);
+            tokio::sync::watch::channel(Duration::ZERO);
 
         let mut start_timestamp = self.start_timestamp;
         if self.should_load_progress
@@ -824,7 +824,7 @@ mod tests {
     /// This guards the "pre-first-window" and "empty-readers" cases: even if the tokio
     /// runtime schedules the worker immediately after `build()`, the reader needs at least
     /// one full generation fetch + safety-interval sleep before the first window completes,
-    /// so the progress must still be at MIN right after construction.
+    /// so the progress must still be at the sentinel (`Duration::ZERO`) right after construction.
     #[tokio::test]
     async fn test_window_progress_initial_sentinel() {
         let (session, ks) = prepare_simple_db(false).await.unwrap();
@@ -843,8 +843,8 @@ mod tests {
         // Must be at the sentinel — no window could have completed yet.
         assert_eq!(
             *reader.window_progress().borrow(),
-            chrono::Duration::MIN,
-            "window_progress must be MIN before the first window completes"
+            Duration::ZERO,
+            "window_progress must be Duration::ZERO before the first window completes"
         );
     }
 
@@ -858,14 +858,14 @@ mod tests {
         const PROGRESS_SLEEP_INTERVAL_MS: u64 = 100;
         const PROGRESS_WINDOW_SIZE_MS: u64 = 300;
         // Start 2 s in the past so we are already past the safety interval.
-        const PROGRESS_START_DELAY_S: i64 = 2;
+        const PROGRESS_START_DELAY_S: u64 = 2;
 
         let (session, ks) = prepare_simple_db(false).await.unwrap();
         for i in 0..3_u32 {
             populate_simple_db_with_pk(&session, i).await.unwrap();
         }
 
-        let start = now() - chrono::Duration::seconds(PROGRESS_START_DELAY_S);
+        let start = now().saturating_sub(Duration::from_secs(PROGRESS_START_DELAY_S));
 
         let (mut reader, _handle) = CDCLogReaderBuilder::new()
             .session(session)
@@ -890,7 +890,7 @@ mod tests {
                     .changed()
                     .await
                     .expect("progress sender dropped");
-                if *progress_rx.borrow() != chrono::Duration::MIN {
+                if *progress_rx.borrow() != Duration::ZERO {
                     break;
                 }
             }
@@ -900,7 +900,7 @@ mod tests {
 
         let pos = *progress_rx.borrow();
         assert!(
-            pos > chrono::Duration::MIN,
+            pos > Duration::ZERO,
             "window_progress should be past the sentinel"
         );
         assert!(

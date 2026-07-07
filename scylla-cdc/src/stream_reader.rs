@@ -29,13 +29,15 @@ use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
 /// The reported value is the `window_begin` of the *next* window to be fetched —
 /// i.e., all CDC rows with `cdc$time < reported_value` have been consumed by this stream reader.
 ///
-/// The value is encoded as a `chrono::Duration` representing unix time (milliseconds since epoch).
-/// The sentinel `chrono::Duration::MIN` means no window has completed yet.
+/// The value is encoded as a [`std::time::Duration`] representing unix time (seconds/millis since
+/// the Unix epoch), matching the direction of PR #150 which replaces `chrono::Duration` with
+/// `std::time::Duration` throughout the public API.
+/// The sentinel `Duration::ZERO` means no window has completed yet.
 ///
 /// This is an internal interface; external callers observe the aggregated minimum via
 /// [`CDCLogReader::window_progress`](crate::log_reader::CDCLogReader::window_progress).
 pub(crate) trait StreamProgress: Send + Sync {
-    fn report(&self, consumed_boundary: chrono::Duration);
+    fn report(&self, consumed_boundary: std::time::Duration);
 }
 
 const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
@@ -347,8 +349,14 @@ impl StreamReader {
             {
                 // Publish the final consumed boundary on clean exit so the aggregator always
                 // sees the true high-water mark for the last (partial) iteration.
+                //
+                // NOTE: the `as u64` cast is safe for unix timestamps (always non-negative).
+                // Once PR #150 lands and window_end is std::time::Duration, replace with
+                // simply `reporter.report(window_end)`.
                 if let Some(reporter) = &self.config.window_progress {
-                    reporter.report(window_end);
+                    reporter.report(std::time::Duration::from_millis(
+                        window_end.num_milliseconds() as u64,
+                    ));
                 }
                 break;
             }
@@ -357,8 +365,13 @@ impl StreamReader {
             checkpoint.timestamp = window_begin.to_std()?;
             sender.send(checkpoint.clone())?;
             // Publish per-stream progress so the log-reader worker can compute the global minimum.
+            //
+            // NOTE: same cast rationale as above; simplify to `reporter.report(window_begin)`
+            // once PR #150 is merged.
             if let Some(reporter) = &self.config.window_progress {
-                reporter.report(window_begin);
+                reporter.report(std::time::Duration::from_millis(
+                    window_begin.num_milliseconds() as u64,
+                ));
             }
             sleep(self.config.sleep_interval).await;
         }
