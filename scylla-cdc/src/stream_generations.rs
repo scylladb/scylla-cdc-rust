@@ -6,7 +6,6 @@ use futures::stream::StreamExt;
 use scylla::client::session::Session;
 use scylla::statement::Consistency;
 use scylla::statement::unprepared::Statement;
-use scylla::value;
 use std::sync::Arc;
 use std::time;
 use tokio::sync::mpsc;
@@ -15,6 +14,7 @@ use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
 use crate::cdc_types::StreamID;
+use crate::cdc_types::Timestamp;
 use crate::cdc_types::make_idempotent_statement;
 
 /// Component responsible for managing stream generations.
@@ -29,7 +29,7 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
     /// Propagates errors.
     async fn fetch_generation_by_timestamp(
         &self,
-        time: &chrono::Duration,
+        time: &Timestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>>;
 
     /// Given a generation returns the next generation.
@@ -66,7 +66,7 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
     /// Returns a receiver for new generations and a handle to the background task.
     async fn fetch_generations_continuously(
         self: Arc<Self>,
-        start_timestamp: chrono::Duration,
+        start_timestamp: Timestamp,
         sleep_interval: time::Duration,
     ) -> anyhow::Result<(mpsc::Receiver<GenerationTimestamp>, RemoteHandle<()>)> {
         let (generation_sender, generation_receiver) = mpsc::channel(1);
@@ -204,7 +204,7 @@ impl GenerationFetcher for VnodeGenerationFetcher {
 
     async fn fetch_generation_by_timestamp(
         &self,
-        time: &chrono::Duration,
+        time: &Timestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query =
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
@@ -212,7 +212,7 @@ impl GenerationFetcher for VnodeGenerationFetcher {
 
         let result = self
             .session
-            .query_unpaged(query, (value::CqlTimestamp(time.num_milliseconds()),))
+            .query_unpaged(query, (time,))
             .await?
             .into_rows_result()?
             .maybe_first_row::<(GenerationTimestamp,)>()?
@@ -373,20 +373,13 @@ impl GenerationFetcher for TabletsGenerationFetcher {
 
     async fn fetch_generation_by_timestamp(
         &self,
-        time: &chrono::Duration,
+        time: &Timestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query = self.get_generation_by_timestamp_query();
 
         let result = self
             .session
-            .query_unpaged(
-                query,
-                (
-                    &self.keyspace_name,
-                    &self.table_name,
-                    value::CqlTimestamp(time.num_milliseconds()),
-                ),
-            )
+            .query_unpaged(query, (&self.keyspace_name, &self.table_name, time))
             .await?
             .into_rows_result()?
             .maybe_first_row::<(GenerationTimestamp,)>()?
@@ -496,6 +489,9 @@ pub fn get_generation_fetcher(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time;
+
+    use crate::cdc_types::Timestamp;
 
     use rstest::rstest;
     use scylla_cdc_test_utils::prepare_db;
@@ -509,6 +505,7 @@ mod tests {
 
     mod vnode_tests {
         use super::*;
+        use scylla::value;
 
         const TEST_STREAM_TABLE: &str = "cdc_streams_descriptions_v2";
         const TEST_GENERATION_TABLE: &str = "cdc_generation_timestamps";
@@ -611,6 +608,7 @@ mod tests {
 
     mod tablets_tests {
         use super::*;
+        use scylla::value;
 
         const TEST_KEYSPACE: &str = "test_tablets_ks";
         const TEST_TABLE: &str = "test_tablets_table";
@@ -755,10 +753,10 @@ mod tests {
 
         let correct_generations = vec![
             GenerationTimestamp {
-                timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+                timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS),
             },
             GenerationTimestamp {
-                timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+                timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS),
             },
         ];
 
@@ -798,7 +796,7 @@ mod tests {
         );
 
         for i in 0..timestamps_ms.len() {
-            let timestamp = chrono::Duration::milliseconds(timestamps_ms[i]);
+            let timestamp = Timestamp::from_millis(timestamps_ms[i]);
 
             let generations = fetcher
                 .fetch_generation_by_timestamp(&timestamp)
@@ -808,7 +806,7 @@ mod tests {
             assert_eq!(
                 generations,
                 correct_generations[i].map(|gen_ms| GenerationTimestamp {
-                    timestamp: chrono::Duration::milliseconds(gen_ms)
+                    timestamp: Timestamp::from_millis(gen_ms)
                 }),
             );
         }
@@ -836,7 +834,7 @@ mod tests {
         assert_eq!(
             gen_old_next.unwrap(),
             GenerationTimestamp {
-                timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS)
+                timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS)
             }
         );
     }
@@ -849,10 +847,10 @@ mod tests {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let gen_before_all_others = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
+            timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS - 1),
         };
         let first_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+            timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS),
         };
         let gen_before_others_next = fetcher
             .fetch_next_generation(&gen_before_all_others)
@@ -869,7 +867,7 @@ mod tests {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let generation = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+            timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS),
         };
 
         let stream_ids = fetcher.fetch_stream_ids(&generation).await.unwrap();
@@ -895,18 +893,18 @@ mod tests {
 
         let (mut generation_receiver, _future) = fetcher
             .fetch_generations_continuously(
-                chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS - 1),
+                Timestamp::from_millis(GENERATION_OLD_MILLISECONDS - 1),
                 time::Duration::from_millis(100),
             )
             .await
             .unwrap();
 
         let first_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_OLD_MILLISECONDS),
+            timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS),
         };
 
         let next_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS),
+            timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS),
         };
 
         let generation = generation_receiver.recv().await.unwrap();
@@ -916,7 +914,7 @@ mod tests {
         assert_eq!(generation, next_gen);
 
         let new_gen = GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(GENERATION_NEW_MILLISECONDS + 100),
+            timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS + 100),
         };
 
         insert_generation_timestamp(&session, tablets_enabled, GENERATION_NEW_MILLISECONDS + 100)

@@ -26,7 +26,6 @@ use std::time::UNIX_EPOCH;
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct Timestamp(i64);
 
-#[allow(dead_code)]
 impl Timestamp {
     /// The earliest representable `Timestamp` (milliseconds = `i64::MIN`).
     pub(crate) const MIN: Self = Timestamp(i64::MIN);
@@ -174,12 +173,12 @@ impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for Timestamp {
 /// A struct representing a timestamp of a stream generation.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct GenerationTimestamp {
-    pub(crate) timestamp: chrono::Duration,
+    pub(crate) timestamp: Timestamp,
 }
 
 impl fmt::Display for GenerationTimestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.timestamp.num_milliseconds())
+        write!(f, "{}", self.timestamp.as_millis())
     }
 }
 
@@ -189,23 +188,21 @@ impl SerializeValue for GenerationTimestamp {
         typ: &ColumnType,
         writer: CellWriter<'b>,
     ) -> Result<WrittenCellProof<'b>, SerializationError> {
-        CqlTimestamp(self.timestamp.num_milliseconds()).serialize(typ, writer)
+        self.timestamp.serialize(typ, writer)
     }
 }
 
 impl<'frame, 'metadata> DeserializeValue<'frame, 'metadata> for GenerationTimestamp {
     fn type_check(typ: &ColumnType) -> Result<(), TypeCheckError> {
-        <CqlTimestamp as DeserializeValue<'frame, 'metadata>>::type_check(typ)
+        Timestamp::type_check(typ)
     }
 
     fn deserialize(
         typ: &'metadata ColumnType<'metadata>,
         v: Option<FrameSlice<'frame>>,
     ) -> Result<Self, DeserializationError> {
-        let timestamp = <CqlTimestamp as DeserializeValue<'frame, 'metadata>>::deserialize(typ, v)?;
-
         Ok(GenerationTimestamp {
-            timestamp: chrono::Duration::milliseconds(timestamp.0),
+            timestamp: Timestamp::deserialize(typ, v)?,
         })
     }
 }

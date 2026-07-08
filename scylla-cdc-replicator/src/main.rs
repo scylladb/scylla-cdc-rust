@@ -50,10 +50,16 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let tables: Vec<_> = args.table.split(',').map(|s| s.to_string()).collect();
     assert!(!tables.is_empty(), "no tables were provided");
-    let start_timestamp = chrono::Duration::milliseconds(match args.start_datetime {
-        Some(s) => chrono::DateTime::parse_from_rfc3339(&s)?.timestamp_millis(),
-        None => chrono::Local::now().timestamp_millis(),
-    });
+    let start_timestamp = match args.start_datetime {
+        Some(s) => Duration::from_millis(
+            u64::try_from(chrono::DateTime::parse_from_rfc3339(&s)?.timestamp_millis()).map_err(
+                |_| anyhow::anyhow!("start datetime must be on or after the Unix epoch"),
+            )?,
+        ),
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is before Unix epoch"),
+    };
     let sleep_interval = Duration::from_secs_f64(args.sleep_interval);
     let mut result = Ok(());
 
