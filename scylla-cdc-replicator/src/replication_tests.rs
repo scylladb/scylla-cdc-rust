@@ -2,14 +2,23 @@
 mod tests {
     use crate::replicator_consumer::ReplicatorConsumer;
     use anyhow::anyhow;
-    use futures_util::{FutureExt, StreamExt, TryStreamExt};
+    use futures_util::FutureExt;
+    use futures_util::StreamExt;
+    use futures_util::TryStreamExt;
     use itertools::Itertools;
     use rstest::rstest;
     use scylla::client::session::Session;
-    use scylla::value::CqlValue::{Boolean, Int, Text, UserDefinedType};
-    use scylla::value::{CqlValue, Row};
-    use scylla_cdc::consumer::{CDCRow, CDCRowSchema, Consumer};
-    use scylla_cdc_test_utils::{prepare_db, skip_if_not_supported};
+    use scylla::value::CqlValue;
+    use scylla::value::CqlValue::Boolean;
+    use scylla::value::CqlValue::Int;
+    use scylla::value::CqlValue::Text;
+    use scylla::value::CqlValue::UserDefinedType;
+    use scylla::value::Row;
+    use scylla_cdc::consumer::CDCRow;
+    use scylla_cdc::consumer::CDCRowSchema;
+    use scylla_cdc::consumer::Consumer;
+    use scylla_cdc_test_utils::prepare_db;
+    use scylla_cdc_test_utils::skip_if_not_supported;
     use std::sync::Arc;
 
     /// Tuple representing a column in the table that will be replicated.

@@ -1,28 +1,41 @@
 //! A module containing the logic responsible for reading data from one stream.
 
-use std::cmp::{max, min};
+use std::cmp::max;
+use std::cmp::min;
 use std::sync::Arc;
-use std::time::{self, Duration};
+use std::time;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use itertools::Itertools;
 use scylla::client::session::Session;
-use scylla::errors::{
-    ConnectionPoolError, DbError, ExecutionError, PrepareError, RequestAttemptError,
-};
+use scylla::errors::ConnectionPoolError;
+use scylla::errors::DbError;
+use scylla::errors::ExecutionError;
+use scylla::errors::PrepareError;
+use scylla::errors::RequestAttemptError;
+use scylla::response::PagingState;
+use scylla::response::PagingStateResponse;
 use scylla::response::query_result::QueryResult;
-use scylla::response::{PagingState, PagingStateResponse};
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value;
 use scylla::value::Row;
 use tokio::sync::watch;
 use tokio::time::sleep;
-use tracing::{debug, enabled, error, warn};
+use tracing::debug;
+use tracing::enabled;
+use tracing::error;
+use tracing::warn;
 
 use crate::CqlIdentifier;
-use crate::cdc_types::{GenerationTimestamp, StreamID};
-use crate::checkpoints::{CDCCheckpointSaver, Checkpoint, start_saving_checkpoints};
-use crate::consumer::{CDCRow, CDCRowSchema, Consumer};
+use crate::cdc_types::GenerationTimestamp;
+use crate::cdc_types::StreamID;
+use crate::checkpoints::CDCCheckpointSaver;
+use crate::checkpoints::Checkpoint;
+use crate::checkpoints::start_saving_checkpoints;
+use crate::consumer::CDCRow;
+use crate::consumer::CDCRowSchema;
+use crate::consumer::Consumer;
 
 const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 const TIMEOUT_FACTOR: u32 = 2;
@@ -460,11 +473,15 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::StreamExt;
     use rstest::rstest;
-    use scylla::errors::{ExecutionError, PrepareError, RequestAttemptError};
+    use scylla::errors::ExecutionError;
+    use scylla::errors::PrepareError;
+    use scylla::errors::RequestAttemptError;
     use scylla::statement::unprepared::Statement;
-    use scylla_cdc_test_utils::{
-        TEST_TABLE, now, populate_simple_db_with_pk, prepare_simple_db, skip_if_not_supported,
-    };
+    use scylla_cdc_test_utils::TEST_TABLE;
+    use scylla_cdc_test_utils::now;
+    use scylla_cdc_test_utils::populate_simple_db_with_pk;
+    use scylla_cdc_test_utils::prepare_simple_db;
+    use scylla_cdc_test_utils::skip_if_not_supported;
     use std::sync::atomic::AtomicIsize;
     use std::sync::atomic::Ordering::Relaxed;
     use tokio::sync::Mutex;

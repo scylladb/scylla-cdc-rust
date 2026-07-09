@@ -1,29 +1,35 @@
 #[cfg(test)]
 mod tests {
-    use crate::log_reader::CDCLogReaderBuilder;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::convert::identity;
     use std::hash::Hash;
     use std::sync::Arc;
     use std::time;
 
-    use anyhow::{Result, bail};
+    use anyhow::Result;
+    use anyhow::bail;
     use async_trait::async_trait;
     use futures::future::RemoteHandle;
-    use itertools::{Itertools, repeat_n};
+    use itertools::Itertools;
+    use itertools::repeat_n;
     use rstest::rstest;
     use scylla::client::session::Session;
     use scylla::frame::response::result::ColumnType;
     use scylla::serialize::SerializationError;
     use scylla::serialize::value::SerializeValue;
-    use scylla::serialize::writers::{CellWriter, WrittenCellProof};
+    use scylla::serialize::writers::CellWriter;
+    use scylla::serialize::writers::WrittenCellProof;
     use scylla::statement::prepared::PreparedStatement;
     use scylla::value::CqlValue;
-    use scylla_cdc_test_utils::{now, prepare_db, skip_if_not_supported};
+    use scylla_cdc_test_utils::now;
+    use scylla_cdc_test_utils::prepare_db;
+    use scylla_cdc_test_utils::skip_if_not_supported;
     use tokio::sync::Mutex;
 
     use crate::checkpoints::TableBackedCheckpointSaver;
     use crate::consumer::*;
+    use crate::log_reader::CDCLogReaderBuilder;
 
     const SECOND_IN_MILLIS: u64 = 1_000;
     const SLEEP_INTERVAL: u64 = SECOND_IN_MILLIS / 10;
