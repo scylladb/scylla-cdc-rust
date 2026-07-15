@@ -15,6 +15,7 @@
 use std::cmp::max;
 use std::sync::Arc;
 use std::time;
+use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow;
@@ -28,6 +29,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
+use crate::cdc_types::Timestamp;
 use crate::cdc_types::make_idempotent_statement;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
@@ -46,22 +48,24 @@ pub struct CDCLogReader {
     // Tells the worker to stop
     // Usage of the "watch" channel will make it possible to change the the timestamp later,
     // for example if somebody loses patience and wants to stop now not later
-    end_timestamp: tokio::sync::watch::Sender<chrono::Duration>,
+    end_timestamp: tokio::sync::watch::Sender<Timestamp>,
 }
 
 impl CDCLogReader {
-    fn new(end_timestamp: tokio::sync::watch::Sender<chrono::Duration>) -> Self {
+    fn new(end_timestamp: tokio::sync::watch::Sender<Timestamp>) -> Self {
         CDCLogReader { end_timestamp }
     }
 
     // Tell the worker to set the end timestamp and then stop
-    pub fn stop_at(&mut self, when: chrono::Duration) {
-        let _ = self.end_timestamp.send(when);
+    pub fn stop_at(&mut self, when: Duration) {
+        let _ = self
+            .end_timestamp
+            .send(Timestamp::from_duration_since_epoch(when));
     }
 
     // Tell the worker to stop immediately
     pub fn stop(&mut self) {
-        self.stop_at(chrono::Duration::MIN);
+        let _ = self.end_timestamp.send(Timestamp::MIN);
     }
 
     /// Checks if the given keyspace uses tablets by querying system_schema.scylla_keyspaces.
@@ -92,9 +96,9 @@ struct CDCReaderWorker {
     session: Arc<Session>,
     keyspace: String,
     table_name: String,
-    end_timestamp: chrono::Duration,
+    end_timestamp: Timestamp,
     readers: Vec<Arc<StreamReader>>,
-    end_timestamp_receiver: tokio::sync::watch::Receiver<chrono::Duration>,
+    end_timestamp_receiver: tokio::sync::watch::Receiver<Timestamp>,
     consumer_factory: Arc<dyn ConsumerFactory>,
     config: CDCReaderConfig,
     uses_tablets: bool,
@@ -118,7 +122,10 @@ impl CDCReaderWorker {
         );
         let (mut generation_receiver, _future_handle) = fetcher
             .clone()
-            .fetch_generations_continuously(self.config.lower_timestamp, self.config.sleep_interval)
+            .fetch_generations_continuously(
+                Timestamp::from_duration_since_epoch(self.config.lower_timestamp),
+                self.config.sleep_interval,
+            )
             .await?;
 
         let mut stream_reader_tasks = FuturesUnordered::new();
@@ -194,9 +201,10 @@ impl CDCReaderWorker {
                         .await?;
                 }
 
-                reader_config.lower_timestamp =
-                    max(self.config.lower_timestamp, generation.timestamp);
-
+                reader_config.lower_timestamp = max(
+                    self.config.lower_timestamp,
+                    generation.timestamp.to_duration_since_epoch(),
+                );
                 self.readers = fetcher
                     .fetch_stream_ids(&generation)
                     .await?
@@ -253,15 +261,15 @@ impl CDCReaderWorker {
 
     /// Updates all of the readers with the new upper timestamp.
     /// When the timestamp is reached, the readers will stop after finishing the current request.
-    async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
+    async fn set_upper_timestamp(&self, ts: Timestamp) {
         for reader in self.readers.iter() {
-            reader.set_upper_timestamp(new_upper_timestamp).await;
+            reader.set_upper_timestamp(ts).await;
         }
     }
 
     /// Updates all of the readers with the timestamp in the past, causing them to stop as soon as the current request finishes.
     async fn stop_now(&self) {
-        self.set_upper_timestamp(chrono::Duration::MIN).await;
+        self.set_upper_timestamp(Timestamp::MIN).await;
     }
 }
 
@@ -311,8 +319,8 @@ pub struct CDCLogReaderBuilder {
     session: Option<Arc<Session>>,
     keyspace: Option<String>,
     table_name: Option<String>,
-    start_timestamp: chrono::Duration,
-    end_timestamp: chrono::Duration,
+    start_timestamp: Duration,
+    end_timestamp: Duration,
     window_size: time::Duration,
     safety_interval: time::Duration,
     sleep_interval: time::Duration,
@@ -336,16 +344,13 @@ impl CDCLogReaderBuilder {
     /// * should_save_progress: false,
     /// * pause_between_saves: 10 seconds
     pub fn new() -> CDCLogReaderBuilder {
-        let end_timestamp = chrono::Duration::MAX;
+        let end_timestamp = Duration::MAX;
         let session = None;
         let keyspace = None;
         let table_name = None;
-        let start_timestamp = chrono::Duration::from_std(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap(),
-        )
-        .unwrap();
+        let start_timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time is before Unix epoch");
         let window_size = time::Duration::from_millis(DEFAULT_WINDOW_SIZE as u64);
         let safety_interval = time::Duration::from_millis(DEFAULT_SAFETY_INTERVAL as u64);
         let sleep_interval = time::Duration::from_millis(DEFAULT_SLEEP_INTERVAL as u64);
@@ -400,14 +405,14 @@ impl CDCLogReaderBuilder {
 
     /// Set start timestamp from which [`CDCLogReader`] instance will start reading
     /// from the user specified CDC log table.
-    pub fn start_timestamp(mut self, start_timestamp: chrono::Duration) -> Self {
+    pub fn start_timestamp(mut self, start_timestamp: Duration) -> Self {
         self.start_timestamp = start_timestamp;
         self
     }
 
     /// Set end timestamp to stop [`CDCLogReader`] instance reading data
     /// from the user specified CDC log table.
-    pub fn end_timestamp(mut self, end_timestamp: chrono::Duration) -> Self {
+    pub fn end_timestamp(mut self, end_timestamp: Duration) -> Self {
         self.end_timestamp = end_timestamp;
         self
     }
@@ -500,7 +505,7 @@ impl CDCLogReaderBuilder {
             anyhow::anyhow!("failed to create the cdc reader: missing consumer factory")
         })?;
 
-        let end_timestamp = chrono::Duration::MAX;
+        let end_timestamp = Timestamp::from_duration_since_epoch(self.end_timestamp);
         let (end_timestamp_sender, end_timestamp_receiver) =
             tokio::sync::watch::channel(end_timestamp);
         let readers = vec![];
@@ -516,7 +521,10 @@ impl CDCLogReaderBuilder {
                 .load_last_generation()
                 .await?
         {
-            start_timestamp = std::cmp::max(generation.timestamp, start_timestamp);
+            start_timestamp = std::cmp::max(
+                generation.timestamp.to_duration_since_epoch(),
+                start_timestamp,
+            );
         }
 
         let uses_tablets = CDCLogReader::uses_tablets(&session, &keyspace).await?;
@@ -536,7 +544,7 @@ impl CDCLogReaderBuilder {
             session,
             keyspace,
             table_name,
-            end_timestamp: self.end_timestamp,
+            end_timestamp: Timestamp::from_duration_since_epoch(self.end_timestamp),
             readers,
             end_timestamp_receiver,
             consumer_factory,

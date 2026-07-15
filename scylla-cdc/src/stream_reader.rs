@@ -1,9 +1,7 @@
 //! A module containing the logic responsible for reading data from one stream.
 
-use std::cmp::max;
-use std::cmp::min;
+use std::cmp;
 use std::sync::Arc;
-use std::time;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,7 +16,6 @@ use scylla::response::PagingState;
 use scylla::response::PagingStateResponse;
 use scylla::response::query_result::QueryResult;
 use scylla::statement::prepared::PreparedStatement;
-use scylla::value;
 use scylla::value::Row;
 use tokio::sync::watch;
 use tokio::time::sleep;
@@ -30,6 +27,7 @@ use tracing::warn;
 use crate::CqlIdentifier;
 use crate::cdc_types::GenerationTimestamp;
 use crate::cdc_types::StreamID;
+use crate::cdc_types::Timestamp;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::checkpoints::Checkpoint;
 use crate::checkpoints::start_saving_checkpoints;
@@ -42,14 +40,14 @@ const TIMEOUT_FACTOR: u32 = 2;
 
 #[derive(Clone)]
 pub struct CDCReaderConfig {
-    pub lower_timestamp: chrono::Duration,
-    pub window_size: time::Duration,
-    pub safety_interval: time::Duration,
-    pub sleep_interval: time::Duration,
+    pub lower_timestamp: Duration,
+    pub window_size: Duration,
+    pub safety_interval: Duration,
+    pub sleep_interval: Duration,
     pub should_load_progress: bool,
     pub should_save_progress: bool,
     pub checkpoint_saver: Option<Arc<dyn CDCCheckpointSaver>>,
-    pub pause_between_saves: time::Duration,
+    pub pause_between_saves: Duration,
 }
 
 /// A wrapper for `Session` objects used to make mocking the Session possible.
@@ -60,8 +58,8 @@ trait StreamSession: Sync + Send {
         &self,
         statement: &PreparedStatement,
         ids: &[StreamID],
-        window_begin: &value::CqlTimestamp,
-        window_end: &value::CqlTimestamp,
+        window_begin: &Timestamp,
+        window_end: &Timestamp,
         paging_state: PagingState,
     ) -> Result<(QueryResult, PagingStateResponse), ExecutionError>;
 }
@@ -76,8 +74,8 @@ impl StreamSession for Session {
         &self,
         statement: &PreparedStatement,
         ids: &[StreamID],
-        window_begin: &value::CqlTimestamp,
-        window_end: &value::CqlTimestamp,
+        window_begin: &Timestamp,
+        window_end: &Timestamp,
         paging_state: PagingState,
     ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
         let (query_result, paging_state_response) = self
@@ -161,7 +159,7 @@ fn is_transient_error(error: &ExecutionError) -> bool {
 pub struct StreamReader {
     session: Arc<dyn StreamSession>,
     stream_id_vec: Vec<StreamID>,
-    upper_timestamp: tokio::sync::Mutex<Option<chrono::Duration>>,
+    upper_timestamp: tokio::sync::Mutex<Option<Timestamp>>,
     config: CDCReaderConfig,
 }
 
@@ -182,9 +180,9 @@ impl StreamReader {
     /// Sets the upper timestamp for the reader.
     /// The [`fetch_cdc`](Self::fetch_cdc) method will stop when this timestamp is reached.
     /// You can update this timestamp even while the [`fetch_cdc`](Self::fetch_cdc) method is running.
-    pub async fn set_upper_timestamp(&self, new_upper_timestamp: chrono::Duration) {
+    pub(crate) async fn set_upper_timestamp(&self, ts: Timestamp) {
         let mut guard = self.upper_timestamp.lock().await;
-        *guard = Some(new_upper_timestamp);
+        *guard = Some(ts);
     }
 
     /// Continuously fetches CDC rows from the specified keyspace.table and passes them to the provided consumer.
@@ -213,12 +211,11 @@ impl StreamReader {
             query_base
         };
 
-        let mut window_begin = self.config.lower_timestamp;
-        // This is nonnegative because `self.config.window_size` is `std::time::Duration`.
-        let window_size = chrono::Duration::from_std(self.config.window_size)?;
-        let safety_interval = chrono::Duration::from_std(self.config.safety_interval)?;
+        let mut window_begin = Timestamp::from_duration_since_epoch(self.config.lower_timestamp);
+        let window_size = self.config.window_size;
+        let safety_interval = self.config.safety_interval;
         let mut checkpoint = Checkpoint {
-            timestamp: window_begin.to_std()?,
+            timestamp: window_begin.to_duration_since_epoch(),
             stream_id: self.stream_id_vec[0].clone(),
             generation: GenerationTimestamp {
                 timestamp: window_begin,
@@ -227,21 +224,22 @@ impl StreamReader {
         let (sender, receiver) = watch::channel(checkpoint.clone());
 
         if self.config.should_load_progress {
-            let mut loaded_timestamp = chrono::Duration::MAX;
+            let mut loaded_timestamp = Timestamp::MAX;
             for stream in &self.stream_id_vec {
-                if let Some(timestamp) = self
+                if let Some(ts) = self
                     .config
                     .checkpoint_saver
                     .as_ref()
                     .unwrap()
                     .load_last_checkpoint(stream)
                     .await?
+                    .map(Timestamp::from_duration_since_epoch)
                 {
-                    loaded_timestamp = min(timestamp, loaded_timestamp);
+                    loaded_timestamp = loaded_timestamp.min(ts);
                 }
             }
-            if loaded_timestamp != chrono::Duration::MAX {
-                window_begin = max(window_begin, loaded_timestamp);
+            if loaded_timestamp != Timestamp::MAX {
+                window_begin = window_begin.max(loaded_timestamp);
             }
         }
 
@@ -255,8 +253,7 @@ impl StreamReader {
             );
         }
 
-        let mut now_timestamp =
-            chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+        let mut now_timestamp = Timestamp::now();
         // Calculate the timestamp until which it is safe to read.
         // We should not read data newer than (now - `safety_interval`),
         // because clock drift and various kinds of latency may influence too recent results.
@@ -270,8 +267,8 @@ impl StreamReader {
                 // If it it's in the future, we issue an error message to make it clear that wrong timestamp was set up as `window_begin`.
                 // Then we wait before starting to read, to satisfy safety interval.
                 error!(
-                    requested_begin_ms_timestamp = window_begin.num_milliseconds(),
-                    current_ms_timestamp = now_timestamp.num_milliseconds(),
+                    requested_begin_ms_timestamp = window_begin.as_millis(),
+                    current_ms_timestamp = now_timestamp.as_millis(),
                     "Provided `CDCReaderConfig::lower_timestamp` that was in the future!\
                     Ensure that the start timestamp is not set in the future or you have a valid checkpoint state.\
                     The CDC readers will wait up to `CDCReaderConfig::safety_interval` before starting to read data."
@@ -284,16 +281,18 @@ impl StreamReader {
                 //
                 // TODO: consider making this log print rate-limited, because there were reports of this being too spammy.
                 debug!(
-                    requested_begin_ms_timestamp = window_begin.num_milliseconds(),
-                    current_ms_timestamp = now_timestamp.num_milliseconds(),
-                    safety_interval_ms = safety_interval.num_milliseconds(),
+                    requested_begin_ms_timestamp = window_begin.as_millis(),
+                    current_ms_timestamp = now_timestamp.as_millis(),
+                    safety_interval_ms = safety_interval.as_millis(),
                     "Provided `CDCReaderConfig::lower_timestamp` that was in a too recent past; it did not include safety interval.\
                     This is expected and minor issue if you provided NOW as the `CDCReaderConfig::lower_timestamp` timestamp.\
                     The CDC readers will wait up to `CDCReaderConfig::safety_interval` before starting to read data."
                 );
             }
             sleep(
-                (window_begin - safe_to_read_until).to_std()?
+                window_begin
+                    .checked_duration_since(safe_to_read_until)
+                    .unwrap_or(Duration::ZERO)
                     // Adding a small buffer to ensure we are past the safety interval, not exactly at its edge.
                     // This is to avoid issues with clock precision.
                     + Duration::from_millis(100),
@@ -302,7 +301,7 @@ impl StreamReader {
         }
 
         loop {
-            now_timestamp = chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis());
+            now_timestamp = Timestamp::now();
             safe_to_read_until = now_timestamp - safety_interval;
 
             // The only possible way for this to happen is when the current `now_timestamp` is less than the previous `now_timestamp`.
@@ -311,13 +310,15 @@ impl StreamReader {
             // In this case, we again wait until the time is safe to read.
             if window_begin > safe_to_read_until {
                 error!(
-                    last_request_end_ms = window_begin.num_milliseconds(),
-                    current_timestamp_ms = now_timestamp.num_milliseconds(),
-                    expected_window_end_ms = safe_to_read_until.num_milliseconds(),
+                    last_request_end_ms = window_begin.as_millis(),
+                    current_timestamp_ms = now_timestamp.as_millis(),
+                    expected_window_end_ms = safe_to_read_until.as_millis(),
                     "The current time broke the monotonicity when creating a CDC request. Ensure the system clock is stable, and is within the safety interval of the database clock."
                 );
                 sleep(
-                    (window_begin - safe_to_read_until).to_std()?
+                    window_begin
+                        .checked_duration_since(safe_to_read_until)
+                        .unwrap_or(Duration::ZERO)
                         // Adding a small buffer to ensure we are past the safety interval, not exactly at its edge.
                         // This is to avoid issues with clock precision.
                         + Duration::from_millis(100),
@@ -327,15 +328,10 @@ impl StreamReader {
             }
 
             // Ask for windows no larger that `window_size`, but also ensure we respect the safety interval.
-            let window_end = std::cmp::min(window_begin + window_size, safe_to_read_until);
+            let window_end = cmp::min(window_begin + window_size, safe_to_read_until);
 
-            self.fetch_and_consume_rows(
-                &query_base,
-                &mut consumer,
-                value::CqlTimestamp(window_begin.num_milliseconds()),
-                value::CqlTimestamp(window_end.num_milliseconds()),
-            )
-            .await?;
+            self.fetch_and_consume_rows(&query_base, &mut consumer, window_begin, window_end)
+                .await?;
 
             if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref()
                 && window_end >= *timestamp_to_stop
@@ -344,7 +340,7 @@ impl StreamReader {
             }
 
             window_begin = window_end;
-            checkpoint.timestamp = window_begin.to_std()?;
+            checkpoint.timestamp = window_begin.to_duration_since_epoch();
             sender.send(checkpoint.clone())?;
             sleep(self.config.sleep_interval).await;
         }
@@ -367,8 +363,8 @@ impl StreamReader {
         &self,
         query_base: &PreparedStatement,
         consumer: &mut Box<dyn Consumer>,
-        window_begin: value::CqlTimestamp,
-        window_end: value::CqlTimestamp,
+        window_begin: Timestamp,
+        window_end: Timestamp,
     ) -> anyhow::Result<()> {
         let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP;
 
@@ -442,8 +438,8 @@ impl StreamReader {
 
     async fn print_request_failure_warning(
         &self,
-        window_begin: &value::CqlTimestamp,
-        window_end: &value::CqlTimestamp,
+        window_begin: &Timestamp,
+        window_end: &Timestamp,
         backoff: Duration,
         page_no: u64,
         driver_error: anyhow::Error,
@@ -457,8 +453,8 @@ impl StreamReader {
 
             warn!(
                 stream_ids = ids_str,
-                window_begin_ms = window_begin.0,
-                window_end_ms = window_end.0,
+                window_begin_ms = window_begin.as_millis(),
+                window_end_ms = window_end.as_millis(),
                 page_no = page_no,
                 current_backoff_ms = backoff.as_millis(),
                 driver_error = format_args!("{:#}", driver_error),
@@ -484,6 +480,7 @@ mod tests {
     use scylla_cdc_test_utils::skip_if_not_supported;
     use std::sync::atomic::AtomicIsize;
     use std::sync::atomic::Ordering::Relaxed;
+    use std::time::SystemTime;
     use tokio::sync::Mutex;
 
     use super::*;
@@ -495,13 +492,18 @@ mod tests {
     const START_TIME_DELAY_IN_SECONDS: i64 = 2;
 
     impl StreamReader {
+        async fn set_upper_ts(&self, d: Duration) {
+            self.set_upper_timestamp(Timestamp::from_duration_since_epoch(d))
+                .await;
+        }
+
         fn test_new(
             session: &Arc<Session>,
             stream_ids: Vec<StreamID>,
-            start_timestamp: chrono::Duration,
-            window_size: time::Duration,
-            safety_interval: time::Duration,
-            sleep_interval: time::Duration,
+            start_timestamp: Duration,
+            window_size: Duration,
+            safety_interval: Duration,
+            sleep_interval: Duration,
         ) -> StreamReader {
             let config = CDCReaderConfig {
                 lower_timestamp: start_timestamp,
@@ -526,10 +528,11 @@ mod tests {
     async fn get_test_stream_reader(session: &Arc<Session>) -> anyhow::Result<StreamReader> {
         let stream_id_vec = get_cdc_stream_id(session).await?;
 
-        let start_timestamp = now() - chrono::Duration::seconds(START_TIME_DELAY_IN_SECONDS);
-        let sleep_interval = time::Duration::from_millis(SLEEP_INTERVAL);
-        let window_size = time::Duration::from_millis(WINDOW_SIZE);
-        let safety_interval = time::Duration::from_millis(SAFETY_INTERVAL);
+        let start_timestamp =
+            now().saturating_sub(Duration::from_secs(START_TIME_DELAY_IN_SECONDS as u64));
+        let sleep_interval = Duration::from_millis(SLEEP_INTERVAL);
+        let window_size = Duration::from_millis(WINDOW_SIZE);
+        let safety_interval = Duration::from_millis(SAFETY_INTERVAL);
 
         let reader = StreamReader::test_new(
             session,
@@ -599,8 +602,8 @@ mod tests {
             &self,
             statement: &PreparedStatement,
             ids: &[StreamID],
-            window_begin: &value::CqlTimestamp,
-            window_end: &value::CqlTimestamp,
+            window_begin: &Timestamp,
+            window_end: &Timestamp,
             paging_state: PagingState,
         ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {
@@ -641,7 +644,7 @@ mod tests {
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
         cdc_reader
-            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .set_upper_ts(now().saturating_add(Duration::from_secs(1)))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
@@ -696,7 +699,7 @@ mod tests {
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
         cdc_reader
-            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .set_upper_ts(now().saturating_add(Duration::from_secs(1)))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {
@@ -728,25 +731,32 @@ mod tests {
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
             TEST_TABLE, 0, 0, "val0", "static0"
         ));
-        let second_ago = chrono::Local::now() - chrono::Duration::seconds(1);
-        let second_ago_timestamp = chrono::Duration::milliseconds(second_ago.timestamp_millis());
-        insert_before_upper_timestamp_query.set_timestamp(second_ago_timestamp.num_microseconds());
+        let second_ago_timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time is before Unix epoch")
+            .saturating_sub(Duration::from_secs(1));
+        insert_before_upper_timestamp_query.set_timestamp(Some(
+            i64::try_from(second_ago_timestamp.as_micros()).unwrap_or(i64::MAX),
+        ));
         shared_session
             .query_unpaged(insert_before_upper_timestamp_query, ())
             .await
             .unwrap();
 
         let cdc_reader = get_test_stream_reader(&shared_session).await.unwrap();
-        cdc_reader.set_upper_timestamp(now()).await;
+        cdc_reader.set_upper_ts(now()).await;
 
         let mut insert_after_upper_timestamp_query = Statement::new(format!(
             "INSERT INTO {} (pk, t, v, s) VALUES ({}, {}, '{}', '{}');",
             TEST_TABLE, 0, 1, "val1", "static1"
         ));
-        let second_later = chrono::Local::now() + chrono::Duration::seconds(1);
-        let second_later_timestamp =
-            chrono::Duration::milliseconds(second_later.timestamp_millis());
-        insert_after_upper_timestamp_query.set_timestamp(second_later_timestamp.num_microseconds());
+        let second_later_timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time is before Unix epoch")
+            .saturating_add(Duration::from_secs(1));
+        insert_after_upper_timestamp_query.set_timestamp(Some(
+            i64::try_from(second_later_timestamp.as_micros()).unwrap_or(i64::MAX),
+        ));
         shared_session
             .query_unpaged(insert_after_upper_timestamp_query, ())
             .await
@@ -790,9 +800,9 @@ mod tests {
         cdc_reader.session = Arc::new(mocked_session);
         // Modify default sleep interval so that the test terminates faster
         // (maximal wait time in backoff is equal to sleep_interval).
-        cdc_reader.config.sleep_interval = time::Duration::from_millis(1500);
+        cdc_reader.config.sleep_interval = Duration::from_millis(1500);
         cdc_reader
-            .set_upper_timestamp(now() + chrono::Duration::seconds(1))
+            .set_upper_ts(now().saturating_add(Duration::from_secs(1)))
             .await;
         let fetched_rows = Arc::new(Mutex::new(vec![]));
         let consumer = Box::new(FetchTestConsumer {

@@ -102,6 +102,7 @@ Now we're ready to create our `main` function:
 use scylla::SessionBuilder;
 use scylla_cdc::log_reader::CDCLogReaderBuilder;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 
 #[tokio::main]
@@ -112,12 +113,10 @@ async fn main() -> anyhow::Result<()> {
             .build()
             .await?,
     );
-    let end = chrono::Duration::from_std(
-        SystemTime::now()
+    let end = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap(),
-    ).unwrap();
-    let start = end - chrono::Duration::seconds(360);
+            .unwrap();
+    let start = end.saturating_sub(Duration::from_secs(360));
     
     let factory = Arc::new(TutorialConsumerFactory);
     
@@ -266,7 +265,7 @@ pub trait CDCCheckpointSaver: Send + Sync {
     async fn load_last_checkpoint(
         &self,
         stream_id: &StreamID,
-    ) -> anyhow::Result<Option<chrono::Duration>>;
+    ) -> anyhow::Result<Option<Duration>>;
 }
 ```
 

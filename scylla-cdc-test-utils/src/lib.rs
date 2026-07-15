@@ -2,6 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
@@ -11,13 +13,15 @@ use scylla::statement::unprepared::Statement;
 pub const TEST_TABLE: &str = "t";
 static UNIQUE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-pub fn now() -> chrono::Duration {
-    chrono::Duration::milliseconds(chrono::Local::now().timestamp_millis())
+pub fn now() -> Duration {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system time is before Unix epoch")
 }
 
 pub fn unique_name() -> String {
     let cnt = UNIQUE_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let name = format!("test_rust_{}_{}", now().num_seconds(), cnt);
+    let name = format!("test_rust_{}_{}", now().as_secs(), cnt);
     println!("unique_name: {name}");
     name
 }

@@ -115,6 +115,7 @@ fn print_field(field_name: &str, field_value: &str) -> String {
 mod tests {
     use std::sync::Arc;
     use std::time;
+    use std::time::Duration;
 
     use scylla_cdc::log_reader::CDCLogReaderBuilder;
     use scylla_cdc_test_utils::TEST_TABLE;
@@ -132,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn test_cdc_log_printer() {
         let start = now();
-        let end = start + chrono::Duration::seconds(2);
+        let end = start + Duration::from_secs(2);
 
         let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
 
