@@ -21,11 +21,8 @@ use std::time::SystemTime;
 use anyhow;
 use futures::FutureExt;
 use futures::future::RemoteHandle;
-use futures::stream::FusedStream;
-use futures::stream::FuturesUnordered;
-use futures::stream::StreamExt;
 use scylla::client::session::Session;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
@@ -128,7 +125,7 @@ impl CDCReaderWorker {
             )
             .await?;
 
-        let mut stream_reader_tasks = FuturesUnordered::new();
+        let mut stream_reader_tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
         let mut next_generation: Option<GenerationTimestamp> = None;
         let mut current_generation: Option<GenerationTimestamp> = None;
@@ -137,21 +134,21 @@ impl CDCReaderWorker {
 
         loop {
             tokio::select! {
-                Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated() => {
+                Some(evt) = stream_reader_tasks.join_next(), if !stream_reader_tasks.is_empty() => {
                     let err = match evt {
-                        Err(error) => Some(anyhow::Error::new(error)),
+                        Err(join_error) => Some(anyhow::Error::new(join_error)),
                         Ok(Err(error)) => Some(error),
-                        _ => None
+                        Ok(Ok(())) => None,
                     };
                     if let Some(err) = err {
                         self.stop_now().await;
                         // We only need to wait for other tasks to finish, we can ignore
                         // any changes to the generation_receiver or end_timestamp_receiver
                         while !stream_reader_tasks.is_empty() {
-                            match stream_reader_tasks.next().await {
+                            match stream_reader_tasks.join_next().await {
                                 Some(Err(e)) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader task panicked: {:#}", e),
                                 Some(Ok(Err(e))) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader returned an error: {:#}", e),
-                                None | Some(Ok(Ok(_)))=> {},
+                                None | Some(Ok(Ok(_))) => {},
                             };
                         }
                         return Err(err);
@@ -220,20 +217,18 @@ impl CDCReaderWorker {
 
                 self.set_upper_timestamp(self.end_timestamp).await;
 
-                let spawn_new_cdc_fetcher =
-                    |reader: &Arc<StreamReader>| -> JoinHandle<anyhow::Result<()>> {
-                        let reader = Arc::clone(reader);
-                        let keyspace = self.keyspace.clone();
-                        let table_name = self.table_name.clone();
-                        let factory = Arc::clone(&self.consumer_factory);
-                        tokio::spawn(async move {
-                            let consumer = factory.new_consumer().await;
-                            reader.fetch_cdc(keyspace, table_name, consumer).await
-                        })
-                    };
-
                 // Spawn a task for each stream reader to fetch CDC rows
-                stream_reader_tasks = self.readers.iter().map(spawn_new_cdc_fetcher).collect();
+                stream_reader_tasks = JoinSet::new();
+                for reader in self.readers.iter() {
+                    let reader = Arc::clone(reader);
+                    let keyspace = self.keyspace.clone();
+                    let table_name = self.table_name.clone();
+                    let factory = Arc::clone(&self.consumer_factory);
+                    stream_reader_tasks.spawn(async move {
+                        let consumer = factory.new_consumer().await;
+                        reader.fetch_cdc(keyspace, table_name, consumer).await
+                    });
+                }
             } else if let Some(current) = current_generation.take() {
                 if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
                     if generation.timestamp <= self.end_timestamp {
