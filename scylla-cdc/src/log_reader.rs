@@ -21,11 +21,8 @@ use std::time::SystemTime;
 use anyhow;
 use futures::FutureExt;
 use futures::future::RemoteHandle;
-use futures::stream::FusedStream;
-use futures::stream::FuturesUnordered;
-use futures::stream::StreamExt;
 use scylla::client::session::Session;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
@@ -128,7 +125,7 @@ impl CDCReaderWorker {
             )
             .await?;
 
-        let mut stream_reader_tasks = FuturesUnordered::new();
+        let mut stream_reader_tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
         let mut next_generation: Option<GenerationTimestamp> = None;
         let mut current_generation: Option<GenerationTimestamp> = None;
@@ -137,21 +134,21 @@ impl CDCReaderWorker {
 
         loop {
             tokio::select! {
-                Some(evt) = stream_reader_tasks.next(), if !stream_reader_tasks.is_terminated() => {
+                Some(evt) = stream_reader_tasks.join_next(), if !stream_reader_tasks.is_empty() => {
                     let err = match evt {
-                        Err(error) => Some(anyhow::Error::new(error)),
+                        Err(join_error) => Some(anyhow::Error::new(join_error)),
                         Ok(Err(error)) => Some(error),
-                        _ => None
+                        Ok(Ok(())) => None,
                     };
                     if let Some(err) = err {
                         self.stop_now().await;
                         // We only need to wait for other tasks to finish, we can ignore
                         // any changes to the generation_receiver or end_timestamp_receiver
                         while !stream_reader_tasks.is_empty() {
-                            match stream_reader_tasks.next().await {
+                            match stream_reader_tasks.join_next().await {
                                 Some(Err(e)) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader task panicked: {:#}", e),
                                 Some(Ok(Err(e))) => warn!("More than one failure occurred in CDCReaderWorker: A stream reader returned an error: {:#}", e),
-                                None | Some(Ok(Ok(_)))=> {},
+                                None | Some(Ok(Ok(_))) => {},
                             };
                         }
                         return Err(err);
@@ -220,20 +217,18 @@ impl CDCReaderWorker {
 
                 self.set_upper_timestamp(self.end_timestamp).await;
 
-                let spawn_new_cdc_fetcher =
-                    |reader: &Arc<StreamReader>| -> JoinHandle<anyhow::Result<()>> {
-                        let reader = Arc::clone(reader);
-                        let keyspace = self.keyspace.clone();
-                        let table_name = self.table_name.clone();
-                        let factory = Arc::clone(&self.consumer_factory);
-                        tokio::spawn(async move {
-                            let consumer = factory.new_consumer().await;
-                            reader.fetch_cdc(keyspace, table_name, consumer).await
-                        })
-                    };
-
                 // Spawn a task for each stream reader to fetch CDC rows
-                stream_reader_tasks = self.readers.iter().map(spawn_new_cdc_fetcher).collect();
+                stream_reader_tasks = JoinSet::new();
+                for reader in self.readers.iter() {
+                    let reader = Arc::clone(reader);
+                    let keyspace = self.keyspace.clone();
+                    let table_name = self.table_name.clone();
+                    let factory = Arc::clone(&self.consumer_factory);
+                    stream_reader_tasks.spawn(async move {
+                        let consumer = factory.new_consumer().await;
+                        reader.fetch_cdc(keyspace, table_name, consumer).await
+                    });
+                }
             } else if let Some(current) = current_generation.take() {
                 if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
                     if generation.timestamp <= self.end_timestamp {
@@ -673,4 +668,80 @@ mod tests {
         // If fails, try increasing pk_count.
         test_err(cond, 150, false).await;
     }
+
+    /* TEST CANCELLATION ON DROP */
+
+    // A guard that fires a `Notify` when dropped. Used to detect task cancellation.
+    struct DropNotify(Arc<tokio::sync::Notify>);
+    impl Drop for DropNotify {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    // A factory whose `new_consumer` signals that it has started, then blocks
+    // forever (simulating a long-running fetch). The `DropNotify` it holds
+    // fires when the task owning it is aborted and the future is dropped.
+    struct BlockingFactory {
+        started: Arc<tokio::sync::Notify>,
+        cancelled: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ConsumerFactory for BlockingFactory {
+        async fn new_consumer(&self) -> Box<dyn Consumer> {
+            // Announce that we are running, then block until aborted.
+            let _guard = DropNotify(Arc::clone(&self.cancelled));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    }
+
+    /// This verifies that dropping the RemoteHandle returned by CDCLogReaderBuilder::build()
+    /// cancels the CDCReaderWorker and all of its stream reader tasks.
+    ///
+    /// This is a regression test for #165. Before, the cancellation propagation was broken,
+    /// and dropping the handle would not cancel CDC fetchers, leading to leaks and orphaned tasks
+    /// that would continue to run until the process exited or they finished on their own.
+    #[tokio::test]
+    async fn test_cancellation_on_drop() {
+        let (session, ks) = prepare_simple_db(false).await.unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+
+        let factory = Arc::new(BlockingFactory {
+            started: Arc::clone(&started),
+            cancelled: Arc::clone(&cancelled),
+        });
+
+        let (_, handle) = CDCLogReaderBuilder::new()
+            .session(session)
+            .keyspace(&ks)
+            .table_name(TEST_TABLE)
+            .start_timestamp(now())
+            .safety_interval(Duration::ZERO)
+            .sleep_interval(Duration::from_millis(100))
+            .consumer_factory(factory)
+            .build()
+            .await
+            .unwrap();
+
+        // Wait until at least one fetcher task is live before dropping.
+        // Sanity check: if the fetcher task doesn't start within 5s, something is very wrong.
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("fetcher task did not start within 5s");
+
+        // Dropping the RemoteHandle cancels CDCReaderWorker, which drops the
+        // JoinSet, which aborts all member tasks, which drops the DropNotify.
+        drop(handle);
+
+        tokio::time::timeout(Duration::from_secs(5), cancelled.notified())
+            .await
+            .expect("fetcher task was not cancelled within 5s after handle drop");
+    }
+
+    /* END TEST CANCELLATION ON DROP */
 }
