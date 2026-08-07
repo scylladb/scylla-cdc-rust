@@ -5,6 +5,7 @@ use crate::cdc_types::StreamID;
 use crate::cdc_types::Timestamp;
 use crate::cdc_types::make_idempotent_statement;
 use anyhow;
+use anyhow::Context;
 use async_trait::async_trait;
 use futures::FutureExt;
 use futures::future::RemoteHandle;
@@ -82,50 +83,60 @@ pub struct TableBackedCheckpointSaver {
     make_checkpoint_stmt: PreparedStatement,
 }
 
+/// Default Time To Live of a checkpoint: 7 days.
+const DEFAULT_TTL: i64 = 604800;
+
 impl TableBackedCheckpointSaver {
+    /// Creates new [`TableBackedCheckpointSaverBuilder`],
+    /// which allows to configure the TTL of the checkpoints
+    /// and whether the checkpoint table should be created.
+    pub fn builder() -> TableBackedCheckpointSaverBuilder {
+        TableBackedCheckpointSaverBuilder::new()
+    }
+
     /// Creates new [`TableBackedCheckpointSaver`].
     /// Will create a table if `keyspace.table_name` doesn't exists.
     /// Created checkpoints will have Time To Live equal to 7 days.
+    ///
+    /// If the session's user is not allowed to create tables, use
+    /// [`TableBackedCheckpointSaver::builder()`] with
+    /// [`TableBackedCheckpointSaverBuilder::create_table(false)`](TableBackedCheckpointSaverBuilder::create_table).
     pub async fn new_with_default_ttl(
         session: Arc<Session>,
         keyspace: &str,
         table_name: &str,
     ) -> anyhow::Result<Self> {
-        const DEFAULT_TTL: i64 = 604800; // 7 days
         TableBackedCheckpointSaver::new(session, keyspace, table_name, DEFAULT_TTL).await
     }
 
     /// Creates new [`TableBackedCheckpointSaver`].
     /// Will create a table if `keyspace.table_name` doesn't exists.
+    ///
+    /// If the session's user is not allowed to create tables, use
+    /// [`TableBackedCheckpointSaver::builder()`] with
+    /// [`TableBackedCheckpointSaverBuilder::create_table(false)`](TableBackedCheckpointSaverBuilder::create_table).
     pub async fn new(
         session: Arc<Session>,
         keyspace: &str,
         table_name: &str,
         ttl: i64,
     ) -> anyhow::Result<Self> {
-        let checkpoint_table = format!(
-            "{}.{}",
-            CqlIdentifier::new(keyspace),
-            CqlIdentifier::new(table_name)
-        );
+        TableBackedCheckpointSaver::builder()
+            .session(session)
+            .keyspace(keyspace)
+            .table_name(table_name)
+            .ttl(ttl)
+            .build()
+            .await
+    }
 
-        TableBackedCheckpointSaver::create_checkpoints_table(&session, &checkpoint_table).await?;
-
-        let make_checkpoint_stmt = session
-            .prepare(format!(
-                "UPDATE {checkpoint_table} USING TTL {ttl}
-                SET generation = ?, time = ?
-                WHERE stream_id = ?"
-            ))
-            .await?;
-
-        let cp_saver = TableBackedCheckpointSaver {
-            session,
-            checkpoint_table,
-            make_checkpoint_stmt,
-        };
-
-        Ok(cp_saver)
+    /// Returns the CQL statement creating the checkpoint table expected by
+    /// [`TableBackedCheckpointSaver`].
+    ///
+    /// Useful when the table has to be created out of band, e.g. by a database
+    /// administrator, because the session's user has no `CREATE` permission.
+    pub fn table_schema_cql(keyspace: &str, table_name: &str) -> String {
+        get_checkpoint_table_schema(&qualified_table_name(keyspace, table_name))
     }
 
     // Creates new table with specified schema in the given keyspace with provided name.
@@ -141,6 +152,134 @@ impl TableBackedCheckpointSaver {
 
         Ok(())
     }
+}
+
+/// [`TableBackedCheckpointSaverBuilder`] is used to create new [`TableBackedCheckpointSaver`] instances.
+pub struct TableBackedCheckpointSaverBuilder {
+    session: Option<Arc<Session>>,
+    keyspace: Option<String>,
+    table_name: Option<String>,
+    ttl: i64,
+    create_table: bool,
+}
+
+impl TableBackedCheckpointSaverBuilder {
+    /// Creates new [`TableBackedCheckpointSaverBuilder`] with default configuration.
+    ///
+    /// # Default configuration
+    /// * ttl: 7 days
+    /// * create_table: true
+    pub fn new() -> TableBackedCheckpointSaverBuilder {
+        TableBackedCheckpointSaverBuilder {
+            session: None,
+            keyspace: None,
+            table_name: None,
+            ttl: DEFAULT_TTL,
+            create_table: true,
+        }
+    }
+
+    /// Set session used to save and load the checkpoints.
+    /// This is a required field for [`TableBackedCheckpointSaverBuilder::build()`].
+    pub fn session(mut self, session: Arc<Session>) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Set keyspace of the checkpoint table.
+    /// This is a required field for [`TableBackedCheckpointSaverBuilder::build()`].
+    pub fn keyspace(mut self, keyspace: &str) -> Self {
+        self.keyspace = Some(keyspace.to_string());
+        self
+    }
+
+    /// Set name of the checkpoint table.
+    /// This is a required field for [`TableBackedCheckpointSaverBuilder::build()`].
+    pub fn table_name(mut self, table_name: &str) -> Self {
+        self.table_name = Some(table_name.to_string());
+        self
+    }
+
+    /// Set Time To Live (in seconds) of the saved checkpoints.
+    /// Default value is 7 days.
+    pub fn ttl(mut self, ttl: i64) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    /// Set flag indicating whether the checkpoint table should be created
+    /// if it doesn't exist yet.
+    ///
+    /// Set it to `false` if the table is managed by the user, e.g. because
+    /// the session's user has no `CREATE` permission. The table is then expected
+    /// to already exist with the schema returned by
+    /// [`TableBackedCheckpointSaver::table_schema_cql()`].
+    /// Default value is `true`.
+    pub fn create_table(mut self, value: bool) -> Self {
+        self.create_table = value;
+        self
+    }
+
+    /// Build the [`TableBackedCheckpointSaver`] after setting all the options.
+    /// It will fail with an error message if all the required fields are not set.
+    /// Currently required fields are the following:
+    /// `session`, `keyspace`, `table_name`
+    pub async fn build(self) -> anyhow::Result<TableBackedCheckpointSaver> {
+        let session = self.session.ok_or_else(|| {
+            anyhow::anyhow!("failed to create the checkpoint saver: missing session")
+        })?;
+        let keyspace = self.keyspace.ok_or_else(|| {
+            anyhow::anyhow!("failed to create the checkpoint saver: missing keyspace name")
+        })?;
+        let table_name = self.table_name.ok_or_else(|| {
+            anyhow::anyhow!("failed to create the checkpoint saver: missing table name")
+        })?;
+
+        let checkpoint_table = qualified_table_name(&keyspace, &table_name);
+        let ttl = self.ttl;
+
+        if self.create_table {
+            TableBackedCheckpointSaver::create_checkpoints_table(&session, &checkpoint_table)
+                .await?;
+        }
+
+        let make_checkpoint_stmt = session
+            .prepare(format!(
+                "UPDATE {checkpoint_table} USING TTL {ttl}
+                SET generation = ?, time = ?
+                WHERE stream_id = ?"
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to prepare the checkpoint statement, \
+                    make sure that the table {checkpoint_table} exists with the expected schema:\n{}",
+                    get_checkpoint_table_schema(&checkpoint_table)
+                )
+            })?;
+
+        Ok(TableBackedCheckpointSaver {
+            session,
+            checkpoint_table,
+            make_checkpoint_stmt,
+        })
+    }
+}
+
+/// Create a [`TableBackedCheckpointSaverBuilder`] with default configuration,
+/// same as [`TableBackedCheckpointSaverBuilder::new()`]
+impl Default for TableBackedCheckpointSaverBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn qualified_table_name(keyspace: &str, table_name: &str) -> String {
+    format!(
+        "{}.{}",
+        CqlIdentifier::new(keyspace),
+        CqlIdentifier::new(table_name)
+    )
 }
 
 fn get_default_generation_pk() -> StreamID {

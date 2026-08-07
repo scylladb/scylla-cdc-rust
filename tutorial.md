@@ -297,6 +297,33 @@ let user_checkpoint_saver = Arc::new(
 
 __Note__: TTL is measured in seconds.
 
+Both constructors create the checkpoint table if it does not exist yet.
+If the table is managed by the user (e.g. the session's user has no `CREATE` permission),
+use the builder and turn the table creation off:
+
+```rust
+let user_checkpoint_saver = Arc::new(
+    TableBackedCheckpointSaver::builder()
+        .session(session)
+        .keyspace("ks")
+        .table_name("checkpoints")
+        .create_table(false)
+        .build()
+        .await
+        .unwrap(),
+);
+```
+
+In that case the table has to exist beforehand with the schema returned by
+`TableBackedCheckpointSaver::table_schema_cql("ks", "checkpoints")`:
+
+```cql
+CREATE TABLE IF NOT EXISTS ks.checkpoints (
+    stream_id blob PRIMARY KEY,
+    generation timestamp,
+    time timestamp)
+```
+
 To save progress, the user needs to enable it while building the `CDCLogReader` and provide an `Arc` containing an object that implements `CDCCheckpointSaver`.
 
 ```rust
