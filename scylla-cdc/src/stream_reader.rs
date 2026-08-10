@@ -25,15 +25,16 @@ use tracing::error;
 use tracing::warn;
 
 use crate::CqlIdentifier;
+use crate::cdc_types::CqlTimestampExt;
 use crate::cdc_types::GenerationTimestamp;
 use crate::cdc_types::StreamID;
-use crate::cdc_types::Timestamp;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::checkpoints::Checkpoint;
 use crate::checkpoints::start_saving_checkpoints;
 use crate::consumer::CDCRow;
 use crate::consumer::CDCRowSchema;
 use crate::consumer::Consumer;
+use scylla::value::CqlTimestamp;
 
 const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 const TIMEOUT_FACTOR: u32 = 2;
@@ -58,8 +59,8 @@ trait StreamSession: Sync + Send {
         &self,
         statement: &PreparedStatement,
         ids: &[StreamID],
-        window_begin: &Timestamp,
-        window_end: &Timestamp,
+        window_begin: &CqlTimestamp,
+        window_end: &CqlTimestamp,
         paging_state: PagingState,
     ) -> Result<(QueryResult, PagingStateResponse), ExecutionError>;
 }
@@ -74,8 +75,8 @@ impl StreamSession for Session {
         &self,
         statement: &PreparedStatement,
         ids: &[StreamID],
-        window_begin: &Timestamp,
-        window_end: &Timestamp,
+        window_begin: &CqlTimestamp,
+        window_end: &CqlTimestamp,
         paging_state: PagingState,
     ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
         let (query_result, paging_state_response) = self
@@ -159,7 +160,7 @@ fn is_transient_error(error: &ExecutionError) -> bool {
 pub struct StreamReader {
     session: Arc<dyn StreamSession>,
     stream_id_vec: Vec<StreamID>,
-    upper_timestamp: tokio::sync::Mutex<Option<Timestamp>>,
+    upper_timestamp: tokio::sync::Mutex<Option<CqlTimestamp>>,
     config: CDCReaderConfig,
 }
 
@@ -180,7 +181,7 @@ impl StreamReader {
     /// Sets the upper timestamp for the reader.
     /// The [`fetch_cdc`](Self::fetch_cdc) method will stop when this timestamp is reached.
     /// You can update this timestamp even while the [`fetch_cdc`](Self::fetch_cdc) method is running.
-    pub(crate) async fn set_upper_timestamp(&self, ts: Timestamp) {
+    pub(crate) async fn set_upper_timestamp(&self, ts: CqlTimestamp) {
         let mut guard = self.upper_timestamp.lock().await;
         *guard = Some(ts);
     }
@@ -211,7 +212,7 @@ impl StreamReader {
             query_base
         };
 
-        let mut window_begin = Timestamp::from_duration_since_epoch(self.config.lower_timestamp);
+        let mut window_begin = CqlTimestamp::from_duration_since_epoch(self.config.lower_timestamp);
         let window_size = self.config.window_size;
         let safety_interval = self.config.safety_interval;
         let mut checkpoint = Checkpoint {
@@ -224,7 +225,7 @@ impl StreamReader {
         let (sender, receiver) = watch::channel(checkpoint.clone());
 
         if self.config.should_load_progress {
-            let mut loaded_timestamp = Timestamp::MAX;
+            let mut loaded_timestamp = CqlTimestamp::MAX;
             for stream in &self.stream_id_vec {
                 if let Some(ts) = self
                     .config
@@ -233,12 +234,12 @@ impl StreamReader {
                     .unwrap()
                     .load_last_checkpoint(stream)
                     .await?
-                    .map(Timestamp::from_duration_since_epoch)
+                    .map(CqlTimestamp::from_duration_since_epoch)
                 {
                     loaded_timestamp = loaded_timestamp.min(ts);
                 }
             }
-            if loaded_timestamp != Timestamp::MAX {
+            if loaded_timestamp != CqlTimestamp::MAX {
                 window_begin = window_begin.max(loaded_timestamp);
             }
         }
@@ -253,7 +254,7 @@ impl StreamReader {
             );
         }
 
-        let mut now_timestamp = Timestamp::now();
+        let mut now_timestamp = CqlTimestamp::now();
         // Calculate the timestamp until which it is safe to read.
         // We should not read data newer than (now - `safety_interval`),
         // because clock drift and various kinds of latency may influence too recent results.
@@ -267,8 +268,8 @@ impl StreamReader {
                 // If it it's in the future, we issue an error message to make it clear that wrong timestamp was set up as `window_begin`.
                 // Then we wait before starting to read, to satisfy safety interval.
                 error!(
-                    requested_begin_ms_timestamp = window_begin.as_millis(),
-                    current_ms_timestamp = now_timestamp.as_millis(),
+                    requested_begin_ms_timestamp = window_begin.0,
+                    current_ms_timestamp = now_timestamp.0,
                     "Provided `CDCReaderConfig::lower_timestamp` that was in the future!\
                     Ensure that the start timestamp is not set in the future or you have a valid checkpoint state.\
                     The CDC readers will wait up to `CDCReaderConfig::safety_interval` before starting to read data."
@@ -281,8 +282,8 @@ impl StreamReader {
                 //
                 // TODO: consider making this log print rate-limited, because there were reports of this being too spammy.
                 debug!(
-                    requested_begin_ms_timestamp = window_begin.as_millis(),
-                    current_ms_timestamp = now_timestamp.as_millis(),
+                    requested_begin_ms_timestamp = window_begin.0,
+                    current_ms_timestamp = now_timestamp.0,
                     safety_interval_ms = safety_interval.as_millis(),
                     "Provided `CDCReaderConfig::lower_timestamp` that was in a too recent past; it did not include safety interval.\
                     This is expected and minor issue if you provided NOW as the `CDCReaderConfig::lower_timestamp` timestamp.\
@@ -301,7 +302,7 @@ impl StreamReader {
         }
 
         loop {
-            now_timestamp = Timestamp::now();
+            now_timestamp = CqlTimestamp::now();
             safe_to_read_until = now_timestamp - safety_interval;
 
             // The only possible way for this to happen is when the current `now_timestamp` is less than the previous `now_timestamp`.
@@ -310,9 +311,9 @@ impl StreamReader {
             // In this case, we again wait until the time is safe to read.
             if window_begin > safe_to_read_until {
                 error!(
-                    last_request_end_ms = window_begin.as_millis(),
-                    current_timestamp_ms = now_timestamp.as_millis(),
-                    expected_window_end_ms = safe_to_read_until.as_millis(),
+                    last_request_end_ms = window_begin.0,
+                    current_timestamp_ms = now_timestamp.0,
+                    expected_window_end_ms = safe_to_read_until.0,
                     "The current time broke the monotonicity when creating a CDC request. Ensure the system clock is stable, and is within the safety interval of the database clock."
                 );
                 sleep(
@@ -363,8 +364,8 @@ impl StreamReader {
         &self,
         query_base: &PreparedStatement,
         consumer: &mut Box<dyn Consumer>,
-        window_begin: Timestamp,
-        window_end: Timestamp,
+        window_begin: CqlTimestamp,
+        window_end: CqlTimestamp,
     ) -> anyhow::Result<()> {
         let mut sleep_after_timeout = BASIC_TIMEOUT_SLEEP;
 
@@ -438,8 +439,8 @@ impl StreamReader {
 
     async fn print_request_failure_warning(
         &self,
-        window_begin: &Timestamp,
-        window_end: &Timestamp,
+        window_begin: &CqlTimestamp,
+        window_end: &CqlTimestamp,
         backoff: Duration,
         page_no: u64,
         driver_error: anyhow::Error,
@@ -453,8 +454,8 @@ impl StreamReader {
 
             warn!(
                 stream_ids = ids_str,
-                window_begin_ms = window_begin.as_millis(),
-                window_end_ms = window_end.as_millis(),
+                window_begin_ms = window_begin.0,
+                window_end_ms = window_end.0,
                 page_no = page_no,
                 current_backoff_ms = backoff.as_millis(),
                 driver_error = format_args!("{:#}", driver_error),
@@ -493,7 +494,7 @@ mod tests {
 
     impl StreamReader {
         async fn set_upper_ts(&self, d: Duration) {
-            self.set_upper_timestamp(Timestamp::from_duration_since_epoch(d))
+            self.set_upper_timestamp(CqlTimestamp::from_duration_since_epoch(d))
                 .await;
         }
 
@@ -602,8 +603,8 @@ mod tests {
             &self,
             statement: &PreparedStatement,
             ids: &[StreamID],
-            window_begin: &Timestamp,
-            window_end: &Timestamp,
+            window_begin: &CqlTimestamp,
+            window_end: &CqlTimestamp,
             paging_state: PagingState,
         ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
             if self.counter.fetch_sub(1, Relaxed) >= 0 {

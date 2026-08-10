@@ -25,14 +25,15 @@ use scylla::client::session::Session;
 use tokio::task::JoinSet;
 use tracing::warn;
 
+use crate::cdc_types::CqlTimestampExt;
 use crate::cdc_types::GenerationTimestamp;
-use crate::cdc_types::Timestamp;
 use crate::cdc_types::make_idempotent_statement;
 use crate::checkpoints::CDCCheckpointSaver;
 use crate::consumer::ConsumerFactory;
 use crate::stream_generations::get_generation_fetcher;
 use crate::stream_reader::CDCReaderConfig;
 use crate::stream_reader::StreamReader;
+use scylla::value::CqlTimestamp;
 
 const SECOND_IN_MILLIS: i64 = 1_000;
 const DEFAULT_SLEEP_INTERVAL: i64 = SECOND_IN_MILLIS * 10;
@@ -45,11 +46,11 @@ pub struct CDCLogReader {
     // Tells the worker to stop
     // Usage of the "watch" channel will make it possible to change the the timestamp later,
     // for example if somebody loses patience and wants to stop now not later
-    end_timestamp: tokio::sync::watch::Sender<Timestamp>,
+    end_timestamp: tokio::sync::watch::Sender<CqlTimestamp>,
 }
 
 impl CDCLogReader {
-    fn new(end_timestamp: tokio::sync::watch::Sender<Timestamp>) -> Self {
+    fn new(end_timestamp: tokio::sync::watch::Sender<CqlTimestamp>) -> Self {
         CDCLogReader { end_timestamp }
     }
 
@@ -57,12 +58,12 @@ impl CDCLogReader {
     pub fn stop_at(&mut self, when: Duration) {
         let _ = self
             .end_timestamp
-            .send(Timestamp::from_duration_since_epoch(when));
+            .send(CqlTimestamp::from_duration_since_epoch(when));
     }
 
     // Tell the worker to stop immediately
     pub fn stop(&mut self) {
-        let _ = self.end_timestamp.send(Timestamp::MIN);
+        let _ = self.end_timestamp.send(CqlTimestamp::MIN);
     }
 
     /// Checks if the given keyspace uses tablets by querying system_schema.scylla_keyspaces.
@@ -93,9 +94,9 @@ struct CDCReaderWorker {
     session: Arc<Session>,
     keyspace: String,
     table_name: String,
-    end_timestamp: Timestamp,
+    end_timestamp: CqlTimestamp,
     readers: Vec<Arc<StreamReader>>,
-    end_timestamp_receiver: tokio::sync::watch::Receiver<Timestamp>,
+    end_timestamp_receiver: tokio::sync::watch::Receiver<CqlTimestamp>,
     consumer_factory: Arc<dyn ConsumerFactory>,
     config: CDCReaderConfig,
     uses_tablets: bool,
@@ -120,7 +121,7 @@ impl CDCReaderWorker {
         let (mut generation_receiver, _future_handle) = fetcher
             .clone()
             .fetch_generations_continuously(
-                Timestamp::from_duration_since_epoch(self.config.lower_timestamp),
+                CqlTimestamp::from_duration_since_epoch(self.config.lower_timestamp),
                 self.config.sleep_interval,
             )
             .await?;
@@ -256,7 +257,7 @@ impl CDCReaderWorker {
 
     /// Updates all of the readers with the new upper timestamp.
     /// When the timestamp is reached, the readers will stop after finishing the current request.
-    async fn set_upper_timestamp(&self, ts: Timestamp) {
+    async fn set_upper_timestamp(&self, ts: CqlTimestamp) {
         for reader in self.readers.iter() {
             reader.set_upper_timestamp(ts).await;
         }
@@ -264,7 +265,7 @@ impl CDCReaderWorker {
 
     /// Updates all of the readers with the timestamp in the past, causing them to stop as soon as the current request finishes.
     async fn stop_now(&self) {
-        self.set_upper_timestamp(Timestamp::MIN).await;
+        self.set_upper_timestamp(CqlTimestamp::MIN).await;
     }
 }
 
@@ -500,7 +501,7 @@ impl CDCLogReaderBuilder {
             anyhow::anyhow!("failed to create the cdc reader: missing consumer factory")
         })?;
 
-        let end_timestamp = Timestamp::from_duration_since_epoch(self.end_timestamp);
+        let end_timestamp = CqlTimestamp::from_duration_since_epoch(self.end_timestamp);
         let (end_timestamp_sender, end_timestamp_receiver) =
             tokio::sync::watch::channel(end_timestamp);
         let readers = vec![];
@@ -539,7 +540,7 @@ impl CDCLogReaderBuilder {
             session,
             keyspace,
             table_name,
-            end_timestamp: Timestamp::from_duration_since_epoch(self.end_timestamp),
+            end_timestamp: CqlTimestamp::from_duration_since_epoch(self.end_timestamp),
             readers,
             end_timestamp_receiver,
             consumer_factory,
