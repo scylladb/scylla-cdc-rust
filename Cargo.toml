@@ -7,3 +7,31 @@ members = [
     "scylla-cdc-replicator",
     "scylla-cdc-test-utils",
 ]
+
+[workspace.dependencies]
+scylla-cdc = { version = "0.6.3", path = "scylla-cdc" }
+scylla-cdc-test-utils = { path = "scylla-cdc-test-utils" }
+
+anyhow = "1.0.51"
+async-trait = "0.1.56"
+chrono = "0.4.32"
+clap = { version = "4.5.9", features = ["derive"] }
+futures = "0.3.17"
+futures-util = "0.3.19"
+hex = "0.4.3"
+itertools = "0.13.0"
+num_enum = "0.7.2"
+rand = "0.8.5"
+rstest = "0.26.1"
+scylla = "1.3.1"
+thiserror = "2.0.6"
+tokio = { version = "1.40", features = [
+    "rt",
+    "io-util",
+    "net",
+    "time",
+    "macros",
+    "sync",
+] }
+tracing = "0.1.36"
+uuid = { version = "1.0.0", features = ["v1"] }
