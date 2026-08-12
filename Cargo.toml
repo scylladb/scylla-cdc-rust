@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.dependencies]
-scylla-cdc = { version = "0.6.3", path = "scylla-cdc" }
+scylla-cdc = { version = "0.7.0", path = "scylla-cdc" }
 scylla-cdc-test-utils = { path = "scylla-cdc-test-utils" }
 
 anyhow = "1.0.51"
