@@ -1,8 +1,8 @@
 //! A module representing the logic behind saving progress.
 use crate::CqlIdentifier;
+use crate::cdc_types::CqlTimestampExt;
 use crate::cdc_types::GenerationTimestamp;
 use crate::cdc_types::StreamID;
-use crate::cdc_types::Timestamp;
 use crate::cdc_types::make_idempotent_statement;
 use anyhow;
 use anyhow::Context;
@@ -12,6 +12,7 @@ use futures::future::RemoteHandle;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value;
+use scylla::value::CqlTimestamp;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -299,7 +300,7 @@ fn get_checkpoint_table_schema(table_name: &str) -> String {
 impl CDCCheckpointSaver for TableBackedCheckpointSaver {
     /// Writes new record containing given timestamp to the checkpoint table.
     async fn save_checkpoint(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
-        let timestamp = Timestamp::from_duration_since_epoch(checkpoint.timestamp);
+        let timestamp = CqlTimestamp::from_duration_since_epoch(checkpoint.timestamp);
 
         self.session
             .execute_unpaged(
@@ -358,16 +359,16 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
             .query_unpaged(statement, (stream_id,))
             .await?
             .into_rows_result()?
-            .maybe_first_row::<(Timestamp,)>()?
+            .maybe_first_row::<(CqlTimestamp,)>()?
             .map(|t| t.0.to_duration_since_epoch()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::cdc_types::CqlTimestampExt;
     use crate::cdc_types::GenerationTimestamp;
     use crate::cdc_types::StreamID;
-    use crate::cdc_types::Timestamp;
     use crate::checkpoints::CDCCheckpointSaver;
     use crate::checkpoints::Checkpoint;
     use crate::checkpoints::TableBackedCheckpointSaver;
@@ -375,6 +376,7 @@ mod tests {
     use futures::TryStreamExt;
     use rand::prelude::*;
     use scylla::client::session::Session;
+    use scylla::value::CqlTimestamp;
     use scylla_cdc_test_utils::prepare_db;
     use scylla_cdc_test_utils::unique_name;
     use std::sync::Arc;
@@ -399,7 +401,7 @@ mod tests {
             .query_iter(format!("SELECT * FROM {table}"), ())
             .await
             .unwrap()
-            .rows_stream::<(StreamID, GenerationTimestamp, Timestamp)>()
+            .rows_stream::<(StreamID, GenerationTimestamp, CqlTimestamp)>()
             .unwrap()
             .map(|res| {
                 res.map(|(id, generation, time)| Checkpoint {
@@ -424,7 +426,7 @@ mod tests {
                 id: vec![1, 1, 1, 1, 1, 1, 1, 1],
             },
             generation: GenerationTimestamp {
-                timestamp: Timestamp::from_duration_since_epoch(Duration::ZERO),
+                timestamp: CqlTimestamp::from_duration_since_epoch(Duration::ZERO),
             },
         };
 
@@ -458,7 +460,7 @@ mod tests {
         let (session, table_name, cp_saver) = setup().await;
 
         let mut generation = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(0),
+            timestamp: CqlTimestamp(0),
         };
 
         let delta = Duration::from_secs(10);
@@ -494,7 +496,7 @@ mod tests {
                 timestamp: Duration::from_secs(random::<u64>() % (100u64 * N_OF_IDS as u64)),
                 stream_id: StreamID { id: vec![0, i] },
                 generation: GenerationTimestamp {
-                    timestamp: Timestamp::MAX,
+                    timestamp: CqlTimestamp::MAX,
                 },
             };
 

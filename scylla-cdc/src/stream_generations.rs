@@ -14,8 +14,8 @@ use tracing::warn;
 
 use crate::cdc_types::GenerationTimestamp;
 use crate::cdc_types::StreamID;
-use crate::cdc_types::Timestamp;
 use crate::cdc_types::make_idempotent_statement;
+use scylla::value::CqlTimestamp;
 
 /// Component responsible for managing stream generations.
 #[async_trait]
@@ -29,7 +29,7 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
     /// Propagates errors.
     async fn fetch_generation_by_timestamp(
         &self,
-        time: &Timestamp,
+        time: &CqlTimestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>>;
 
     /// Given a generation returns the next generation.
@@ -66,7 +66,7 @@ pub(crate) trait GenerationFetcher: Send + Sync + 'static {
     /// Returns a receiver for new generations and a handle to the background task.
     async fn fetch_generations_continuously(
         self: Arc<Self>,
-        start_timestamp: Timestamp,
+        start_timestamp: CqlTimestamp,
         sleep_interval: time::Duration,
     ) -> anyhow::Result<(mpsc::Receiver<GenerationTimestamp>, RemoteHandle<()>)> {
         let (generation_sender, generation_receiver) = mpsc::channel(1);
@@ -204,7 +204,7 @@ impl GenerationFetcher for VnodeGenerationFetcher {
 
     async fn fetch_generation_by_timestamp(
         &self,
-        time: &Timestamp,
+        time: &CqlTimestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query =
             new_distributed_system_query(self.get_generation_by_timestamp_query(), &self.session)
@@ -373,7 +373,7 @@ impl GenerationFetcher for TabletsGenerationFetcher {
 
     async fn fetch_generation_by_timestamp(
         &self,
-        time: &Timestamp,
+        time: &CqlTimestamp,
     ) -> anyhow::Result<Option<GenerationTimestamp>> {
         let query = self.get_generation_by_timestamp_query();
 
@@ -491,7 +491,7 @@ mod tests {
     use std::sync::Arc;
     use std::time;
 
-    use crate::cdc_types::Timestamp;
+    use scylla::value::CqlTimestamp;
 
     use rstest::rstest;
     use scylla_cdc_test_utils::prepare_db;
@@ -753,10 +753,10 @@ mod tests {
 
         let correct_generations = vec![
             GenerationTimestamp {
-                timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS),
+                timestamp: CqlTimestamp(GENERATION_NEW_MILLISECONDS),
             },
             GenerationTimestamp {
-                timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS),
+                timestamp: CqlTimestamp(GENERATION_OLD_MILLISECONDS),
             },
         ];
 
@@ -796,7 +796,7 @@ mod tests {
         );
 
         for i in 0..timestamps_ms.len() {
-            let timestamp = Timestamp::from_millis(timestamps_ms[i]);
+            let timestamp = CqlTimestamp(timestamps_ms[i]);
 
             let generations = fetcher
                 .fetch_generation_by_timestamp(&timestamp)
@@ -806,7 +806,7 @@ mod tests {
             assert_eq!(
                 generations,
                 correct_generations[i].map(|gen_ms| GenerationTimestamp {
-                    timestamp: Timestamp::from_millis(gen_ms)
+                    timestamp: CqlTimestamp(gen_ms)
                 }),
             );
         }
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(
             gen_old_next.unwrap(),
             GenerationTimestamp {
-                timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS)
+                timestamp: CqlTimestamp(GENERATION_NEW_MILLISECONDS)
             }
         );
     }
@@ -847,10 +847,10 @@ mod tests {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let gen_before_all_others = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS - 1),
+            timestamp: CqlTimestamp(GENERATION_OLD_MILLISECONDS - 1),
         };
         let first_gen = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS),
+            timestamp: CqlTimestamp(GENERATION_OLD_MILLISECONDS),
         };
         let gen_before_others_next = fetcher
             .fetch_next_generation(&gen_before_all_others)
@@ -867,7 +867,7 @@ mod tests {
         let fetcher = setup(tablets_enabled).await.unwrap().0;
 
         let generation = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS),
+            timestamp: CqlTimestamp(GENERATION_NEW_MILLISECONDS),
         };
 
         let stream_ids = fetcher.fetch_stream_ids(&generation).await.unwrap();
@@ -893,18 +893,18 @@ mod tests {
 
         let (mut generation_receiver, _future) = fetcher
             .fetch_generations_continuously(
-                Timestamp::from_millis(GENERATION_OLD_MILLISECONDS - 1),
+                CqlTimestamp(GENERATION_OLD_MILLISECONDS - 1),
                 time::Duration::from_millis(100),
             )
             .await
             .unwrap();
 
         let first_gen = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(GENERATION_OLD_MILLISECONDS),
+            timestamp: CqlTimestamp(GENERATION_OLD_MILLISECONDS),
         };
 
         let next_gen = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS),
+            timestamp: CqlTimestamp(GENERATION_NEW_MILLISECONDS),
         };
 
         let generation = generation_receiver.recv().await.unwrap();
@@ -914,7 +914,7 @@ mod tests {
         assert_eq!(generation, next_gen);
 
         let new_gen = GenerationTimestamp {
-            timestamp: Timestamp::from_millis(GENERATION_NEW_MILLISECONDS + 100),
+            timestamp: CqlTimestamp(GENERATION_NEW_MILLISECONDS + 100),
         };
 
         insert_generation_timestamp(&session, tablets_enabled, GENERATION_NEW_MILLISECONDS + 100)
