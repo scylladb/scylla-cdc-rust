@@ -607,10 +607,10 @@ impl ReplicatorConsumer {
 
         let values_right = &values[table_schema.partition_key.len()..];
 
-        let first_unequal_position = values_left
+        let first_unequal_or_null_position = values_left
             .iter()
             .zip(values_right.iter())
-            .position(|pair| pair.0 != pair.1)
+            .position(|pair| pair.0 != pair.1 || pair.0.is_none())
             .unwrap_or(table_schema.clustering_key.len());
 
         let keys_equality_cond = table_schema
@@ -630,14 +630,14 @@ impl ReplicatorConsumer {
             &mut conditions,
             &mut query_values,
             &values_left,
-            first_unequal_position,
+            first_unequal_or_null_position,
             greater_than,
         );
         self.add_range_condition(
             &mut conditions,
             &mut query_values,
             values_right,
-            first_unequal_position,
+            first_unequal_or_null_position,
             less_than,
         );
 
