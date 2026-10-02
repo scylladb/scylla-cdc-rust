@@ -984,4 +984,26 @@ mod tests {
 
         skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
     }
+
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
+    #[tokio::test]
+    async fn test_prefix_range_delete(#[case] tablets_enabled: bool) {
+        let schema = TestTableSchema {
+            name: "PREFIX_RANGE_DELETE".to_string(),
+            partition_key: vec![("pk", "int")],
+            clustering_key: vec![("ck1", "int"), ("ck2", "int")],
+            other_columns: vec![("v", "int")],
+        };
+
+        let operations = vec![
+            "INSERT INTO PREFIX_RANGE_DELETE (pk, ck1, ck2, v) VALUES (0, 0, 0, 0)",
+            "INSERT INTO PREFIX_RANGE_DELETE (pk, ck1, ck2, v) VALUES (0, 0, 1, 1)",
+            "INSERT INTO PREFIX_RANGE_DELETE (pk, ck1, ck2, v) VALUES (0, 1, 0, 2)",
+            "DELETE FROM PREFIX_RANGE_DELETE WHERE pk = 0 AND ck1 = 0",
+        ];
+
+        skip_if_not_supported!(test_replication(schema, operations, tablets_enabled));
+    }
 }
