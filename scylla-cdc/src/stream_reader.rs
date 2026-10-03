@@ -39,6 +39,23 @@ use scylla::value::CqlTimestamp;
 const BASIC_TIMEOUT_SLEEP: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 const TIMEOUT_FACTOR: u32 = 2;
 
+fn capped_window_end(
+    window_begin: CqlTimestamp,
+    window_size: Duration,
+    cap: CqlTimestamp,
+) -> CqlTimestamp {
+    let remaining = cap
+        .checked_duration_since(window_begin)
+        .unwrap_or(Duration::ZERO);
+    if window_size >= remaining {
+        cap
+    } else {
+        // `window_size` is smaller than the representable distance to `cap`, so this cannot
+        // overflow even when `window_begin` is close to `CqlTimestamp::MAX`.
+        window_begin + window_size
+    }
+}
+
 #[derive(Clone)]
 pub struct CDCReaderConfig {
     pub lower_timestamp: Duration,
@@ -160,6 +177,9 @@ fn is_transient_error(error: &ExecutionError) -> bool {
 pub struct StreamReader {
     session: Arc<dyn StreamSession>,
     stream_id_vec: Vec<StreamID>,
+    // Authoritative public end/stop bound shared by every reader.
+    end_timestamp_receiver: watch::Receiver<CqlTimestamp>,
+    // Per-reader generation boundary or sibling-error stop bound.
     upper_timestamp: tokio::sync::Mutex<Option<CqlTimestamp>>,
     config: CDCReaderConfig,
 }
@@ -169,27 +189,85 @@ impl StreamReader {
         session: &Arc<Session>,
         stream_ids: Vec<StreamID>,
         config: CDCReaderConfig,
+        end_timestamp_receiver: watch::Receiver<CqlTimestamp>,
     ) -> StreamReader {
         StreamReader {
             session: session.clone(),
             stream_id_vec: stream_ids,
+            end_timestamp_receiver,
             upper_timestamp: Default::default(),
             config,
         }
     }
 
-    /// Sets the upper timestamp for the reader.
-    /// The [`fetch_cdc`](Self::fetch_cdc) method will stop when this timestamp is reached.
-    /// You can update this timestamp even while the [`fetch_cdc`](Self::fetch_cdc) method is running.
+    /// Sets or monotonically lowers the upper timestamp for the reader.
+    ///
+    /// This is a stop request, not immediate cancellation. If a logical paged request has already
+    /// started, all of its continuation pages retain the request's original
+    /// `[window_begin, window_end)` bounds and may deliver rows beyond a newly lowered timestamp.
+    /// The new timestamp is observed before another logical request starts.
     pub(crate) async fn set_upper_timestamp(&self, ts: CqlTimestamp) {
         let mut guard = self.upper_timestamp.lock().await;
-        *guard = Some(ts);
+        *guard = Some(match *guard {
+            Some(current) => cmp::min(current, ts),
+            None => ts,
+        });
+    }
+
+    /// Runs `decision` against the earliest stop bound while both bound guards remain held.
+    /// Keeping the guards through the decision prevents either bound from being lowered between
+    /// reading it and acting on it.
+    async fn with_effective_upper_timestamp<T>(
+        &self,
+        decision: impl FnOnce(CqlTimestamp) -> T,
+    ) -> T {
+        let local_upper_timestamp = self.upper_timestamp.lock().await;
+        let end_timestamp = self.end_timestamp_receiver.borrow();
+        let effective_upper_timestamp = local_upper_timestamp.map_or(*end_timestamp, |timestamp| {
+            cmp::min(timestamp, *end_timestamp)
+        });
+
+        decision(effective_upper_timestamp)
+    }
+
+    /// Checks whether `timestamp` has reached either the public end timestamp or the local
+    /// generation/error cap.
+    async fn upper_timestamp_reached(&self, timestamp: CqlTimestamp) -> bool {
+        self.with_effective_upper_timestamp(|effective_upper_timestamp| {
+            timestamp >= effective_upper_timestamp
+        })
+        .await
+    }
+
+    /// Atomically admits the next logical window against both stop bounds. Once this returns a
+    /// window, later bound updates apply after all pages and retries for that window finish.
+    async fn admit_window(
+        &self,
+        window_begin: CqlTimestamp,
+        window_size: Duration,
+        safe_to_read_until: CqlTimestamp,
+    ) -> Option<CqlTimestamp> {
+        self.with_effective_upper_timestamp(|effective_upper_timestamp| {
+            if window_begin >= effective_upper_timestamp {
+                return None;
+            }
+
+            let window_cap = cmp::min(safe_to_read_until, effective_upper_timestamp);
+            Some(capped_window_end(window_begin, window_size, window_cap))
+        })
+        .await
     }
 
     /// Continuously fetches CDC rows from the specified keyspace.table and passes them to the provided consumer.
     /// This function returns when the upper timestamp is reached or an error other than the timeout occurs.
     /// By default the upper timestamp is not set, so the function continues indefinitely.
     /// You can set it using the [`set_upper_timestamp`](Self::set_upper_timestamp) method.
+    ///
+    /// An upper timestamp is a stop request, not immediate cancellation. Each time window is one
+    /// logical request that includes its initial page and all paging continuations. Once such a
+    /// request starts, it completes with its original `[window_begin, window_end)` bounds before a
+    /// newly lowered upper timestamp is observed, so its remaining rows are still passed to the
+    /// consumer.
     ///
     /// When the request to the database fails due to timeout, it continues retrying with exponential backoff.
     pub async fn fetch_cdc(
@@ -260,8 +338,9 @@ impl StreamReader {
         // because clock drift and various kinds of latency may influence too recent results.
         let mut safe_to_read_until = now_timestamp - safety_interval;
 
-        // The first `window_begin` is set by the user (or loaded from checkpoint).
-        if window_begin > safe_to_read_until {
+        // Initial gate: avoid entering the initial safety wait when a preset bound already stops
+        // the reader. The first `window_begin` is set by the user (or loaded from checkpoint).
+        if !self.upper_timestamp_reached(window_begin).await && window_begin > safe_to_read_until {
             // If it is too close to the current time, we wait until we can start reading.
             // This is done to prevent errors such as reading out-of-order changes, or skipping some changes.
             if window_begin > now_timestamp {
@@ -302,6 +381,12 @@ impl StreamReader {
         }
 
         loop {
+            // Post-wait gate: observe bounds changed during the initial safety wait, an
+            // inter-window sleep, or a clock-regression sleep before doing more work.
+            if self.upper_timestamp_reached(window_begin).await {
+                break;
+            }
+
             now_timestamp = CqlTimestamp::now();
             safe_to_read_until = now_timestamp - safety_interval;
 
@@ -328,15 +413,22 @@ impl StreamReader {
                 continue;
             }
 
-            // Ask for windows no larger that `window_size`, but also ensure we respect the safety interval.
-            let window_end = cmp::min(window_begin + window_size, safe_to_read_until);
+            // Pre-request gate: synchronously admit the next logical paged request against the
+            // public end timestamp, the local generation/error cap, and the safety frontier. A
+            // bound lowered after admission applies once all of this window's pages finish.
+            let Some(window_end) = self
+                .admit_window(window_begin, window_size, safe_to_read_until)
+                .await
+            else {
+                break;
+            };
 
             self.fetch_and_consume_rows(&query_base, &mut consumer, window_begin, window_end)
                 .await?;
 
-            if let Some(timestamp_to_stop) = self.upper_timestamp.lock().await.as_ref()
-                && window_end >= *timestamp_to_stop
-            {
+            // Post-request gate: the completed logical request includes every continuation page;
+            // only now can a bound lowered while it was in flight stop the reader.
+            if self.upper_timestamp_reached(window_end).await {
                 break;
             }
 
@@ -358,8 +450,11 @@ impl StreamReader {
         Ok(())
     }
 
-    /// Attempts to execute statement fetching all pages of CDC rows for the given time window.
-    /// In case of timeouts, it retries with exponential backoff.
+    /// Executes one logical CDC request for the fixed `[window_begin, window_end)` time window.
+    ///
+    /// The request includes the initial page and every paging continuation. All page round trips
+    /// retain the original window parameters. In case of timeouts, the current page is retried
+    /// with exponential backoff.
     async fn fetch_and_consume_rows(
         &self,
         query_base: &PreparedStatement,
@@ -480,6 +575,7 @@ mod tests {
     use scylla_cdc_test_utils::prepare_simple_db;
     use scylla_cdc_test_utils::skip_if_not_supported;
     use std::sync::atomic::AtomicIsize;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
     use std::time::SystemTime;
     use tokio::sync::Mutex;
@@ -506,6 +602,45 @@ mod tests {
             safety_interval: Duration,
             sleep_interval: Duration,
         ) -> StreamReader {
+            Self::test_new_with_session(
+                session.clone(),
+                stream_ids,
+                start_timestamp,
+                window_size,
+                safety_interval,
+                sleep_interval,
+            )
+        }
+
+        fn test_new_with_session(
+            session: Arc<dyn StreamSession>,
+            stream_ids: Vec<StreamID>,
+            start_timestamp: Duration,
+            window_size: Duration,
+            safety_interval: Duration,
+            sleep_interval: Duration,
+        ) -> StreamReader {
+            let (_, end_timestamp_receiver) = watch::channel(CqlTimestamp::MAX);
+            Self::test_new_with_session_and_end_timestamp(
+                session,
+                stream_ids,
+                start_timestamp,
+                window_size,
+                safety_interval,
+                sleep_interval,
+                end_timestamp_receiver,
+            )
+        }
+
+        fn test_new_with_session_and_end_timestamp(
+            session: Arc<dyn StreamSession>,
+            stream_ids: Vec<StreamID>,
+            start_timestamp: Duration,
+            window_size: Duration,
+            safety_interval: Duration,
+            sleep_interval: Duration,
+            end_timestamp_receiver: watch::Receiver<CqlTimestamp>,
+        ) -> StreamReader {
             let config = CDCReaderConfig {
                 lower_timestamp: start_timestamp,
                 window_size,
@@ -518,8 +653,9 @@ mod tests {
             };
 
             StreamReader {
-                session: session.clone(),
+                session,
                 stream_id_vec: stream_ids,
+                end_timestamp_receiver,
                 upper_timestamp: Default::default(),
                 config,
             }
@@ -574,13 +710,28 @@ mod tests {
     #[async_trait]
     impl Consumer for FetchTestConsumer {
         async fn consume_cdc(&mut self, mut data: CDCRow<'_>) -> anyhow::Result<()> {
-            let new_val = (
+            self.fetched_rows.lock().await.push((
                 data.take_value("pk").unwrap().as_int().unwrap(),
                 data.take_value("s").unwrap().as_text().unwrap().to_string(),
                 data.take_value("t").unwrap().as_int().unwrap(),
                 data.take_value("v").unwrap().as_text().unwrap().to_string(),
-            );
-            self.fetched_rows.lock().await.push(new_val);
+            ));
+            Ok(())
+        }
+    }
+
+    struct LoweringEndTimestampConsumer {
+        rows_consumed: Arc<AtomicUsize>,
+        end_timestamp_sender: Option<watch::Sender<CqlTimestamp>>,
+    }
+
+    #[async_trait]
+    impl Consumer for LoweringEndTimestampConsumer {
+        async fn consume_cdc(&mut self, _data: CDCRow<'_>) -> anyhow::Result<()> {
+            self.rows_consumed.fetch_add(1, Relaxed);
+            if let Some(sender) = self.end_timestamp_sender.take() {
+                sender.send(CqlTimestamp::MIN).unwrap();
+            }
             Ok(())
         }
     }
@@ -588,6 +739,87 @@ mod tests {
     struct TimeoutSession {
         session: Arc<Session>,
         counter: Arc<AtomicIsize>,
+    }
+
+    struct UnusedSession;
+
+    #[async_trait]
+    impl StreamSession for UnusedSession {
+        async fn prepare_statement(
+            &self,
+            _query: String,
+        ) -> Result<PreparedStatement, PrepareError> {
+            unreachable!()
+        }
+
+        async fn execute_paged_statement(
+            &self,
+            _statement: &PreparedStatement,
+            _ids: &[StreamID],
+            _window_begin: &CqlTimestamp,
+            _window_end: &CqlTimestamp,
+            _paging_state: PagingState,
+        ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
+            unreachable!()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RecordedPagingState {
+        Initial,
+        Continuation,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct RecordedPageRequest {
+        window_begin: CqlTimestamp,
+        window_end: CqlTimestamp,
+        paging_state: RecordedPagingState,
+    }
+
+    struct RecordingSession {
+        session: Arc<Session>,
+        page_size: Option<i32>,
+        page_requests: Arc<Mutex<Vec<RecordedPageRequest>>>,
+    }
+
+    #[async_trait]
+    impl StreamSession for RecordingSession {
+        async fn prepare_statement(
+            &self,
+            query: String,
+        ) -> Result<PreparedStatement, PrepareError> {
+            let mut statement = self.session.prepare(query).await?;
+            if let Some(page_size) = self.page_size {
+                statement.set_page_size(page_size);
+            }
+            Ok(statement)
+        }
+
+        async fn execute_paged_statement(
+            &self,
+            statement: &PreparedStatement,
+            ids: &[StreamID],
+            window_begin: &CqlTimestamp,
+            window_end: &CqlTimestamp,
+            paging_state: PagingState,
+        ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
+            let recorded_paging_state = if paging_state.as_bytes_slice().is_none() {
+                RecordedPagingState::Initial
+            } else {
+                RecordedPagingState::Continuation
+            };
+            let result = self
+                .session
+                .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
+                .await?;
+            self.page_requests.lock().await.push(RecordedPageRequest {
+                window_begin: *window_begin,
+                window_end: *window_end,
+                paging_state: recorded_paging_state,
+            });
+            Ok(result)
+        }
     }
 
     #[async_trait]
@@ -625,6 +857,219 @@ mod tests {
                 Ok((query_result, paging_state_response))
             }
         }
+    }
+
+    #[tokio::test]
+    async fn upper_bounds_are_monotonic_and_gate_window_admission() {
+        let (end_timestamp_sender, end_timestamp_receiver) = watch::channel(CqlTimestamp(300));
+        let reader = StreamReader::test_new_with_session_and_end_timestamp(
+            Arc::new(UnusedSession),
+            Vec::new(),
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Duration::ZERO,
+            Duration::ZERO,
+            end_timestamp_receiver,
+        );
+        reader.set_upper_timestamp(CqlTimestamp(200)).await;
+        reader.set_upper_timestamp(CqlTimestamp(300)).await;
+
+        assert_eq!(
+            reader
+                .admit_window(
+                    CqlTimestamp(150),
+                    Duration::from_millis(100),
+                    CqlTimestamp(500),
+                )
+                .await,
+            Some(CqlTimestamp(200)),
+            "a later local cap must not replace an earlier one"
+        );
+
+        reader.set_upper_timestamp(CqlTimestamp(100)).await;
+        assert_eq!(
+            reader
+                .admit_window(
+                    CqlTimestamp(50),
+                    Duration::from_millis(100),
+                    CqlTimestamp(500),
+                )
+                .await,
+            Some(CqlTimestamp(100)),
+            "an earlier local cap must lower the admitted window"
+        );
+
+        end_timestamp_sender.send(CqlTimestamp(75)).unwrap();
+
+        assert_eq!(
+            *reader.upper_timestamp.lock().await,
+            Some(CqlTimestamp(100)),
+            "the public bound remains separate from the local generation cap"
+        );
+        assert_eq!(
+            reader
+                .admit_window(
+                    CqlTimestamp(50),
+                    Duration::from_millis(100),
+                    CqlTimestamp(500),
+                )
+                .await,
+            Some(CqlTimestamp(75)),
+            "the public bound caps an admitted window directly"
+        );
+        assert_eq!(
+            reader
+                .admit_window(
+                    CqlTimestamp(75),
+                    Duration::from_millis(100),
+                    CqlTimestamp(500),
+                )
+                .await,
+            None,
+            "no logical window starts at the public bound"
+        );
+    }
+
+    #[test]
+    fn window_end_is_capped_without_overflow() {
+        assert_eq!(
+            capped_window_end(
+                CqlTimestamp(i64::MAX - 10),
+                Duration::from_millis(20),
+                CqlTimestamp::MAX,
+            ),
+            CqlTimestamp::MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn query_windows_stop_at_upper_timestamp() {
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
+        populate_simple_db_with_pk(&shared_session, 0)
+            .await
+            .unwrap();
+        let stream_ids = get_cdc_stream_id(&shared_session).await.unwrap();
+
+        let page_requests = Arc::new(Mutex::new(Vec::new()));
+        let recording_session: Arc<dyn StreamSession> = Arc::new(RecordingSession {
+            session: shared_session,
+            page_size: None,
+            page_requests: Arc::clone(&page_requests),
+        });
+        let start_timestamp = now().saturating_sub(Duration::from_secs(2));
+        let upper_timestamp = start_timestamp + Duration::from_millis(50);
+        let start = CqlTimestamp::from_duration_since_epoch(start_timestamp);
+        let upper = CqlTimestamp::from_duration_since_epoch(upper_timestamp);
+
+        for (reader_start, expected_requests) in [
+            (
+                start_timestamp,
+                vec![RecordedPageRequest {
+                    window_begin: start,
+                    window_end: upper,
+                    paging_state: RecordedPagingState::Initial,
+                }],
+            ),
+            (upper_timestamp, vec![]),
+        ] {
+            page_requests.lock().await.clear();
+            let reader = StreamReader::test_new_with_session(
+                Arc::clone(&recording_session),
+                stream_ids.clone(),
+                reader_start,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                Duration::ZERO,
+            );
+            reader.set_upper_ts(upper_timestamp).await;
+            reader
+                .fetch_cdc(
+                    ks.clone(),
+                    TEST_TABLE.to_string(),
+                    Box::new(FetchTestConsumer {
+                        fetched_rows: Arc::new(Mutex::new(Vec::new())),
+                    }),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(*page_requests.lock().await, expected_requests);
+        }
+    }
+
+    #[tokio::test]
+    async fn lowered_public_end_timestamp_finishes_in_flight_paged_window() {
+        let (shared_session, ks) = prepare_simple_db(false).await.unwrap();
+        let start_timestamp = now().saturating_sub(Duration::from_secs(2));
+        populate_simple_db_with_pk(&shared_session, 0)
+            .await
+            .unwrap();
+        // The query's upper bound has millisecond precision and is exclusive. Let the database
+        // clock move past the final insert so every fixture row falls inside the first window.
+        sleep(Duration::from_millis(100)).await;
+        let stream_ids = get_cdc_stream_id(&shared_session).await.unwrap();
+
+        let expected_window_begin = CqlTimestamp::from_duration_since_epoch(start_timestamp);
+        let page_requests = Arc::new(Mutex::new(Vec::new()));
+        let recording_session: Arc<dyn StreamSession> = Arc::new(RecordingSession {
+            session: shared_session,
+            page_size: Some(1),
+            page_requests: Arc::clone(&page_requests),
+        });
+        let (end_timestamp_sender, end_timestamp_receiver) = watch::channel(CqlTimestamp::MAX);
+        let reader = StreamReader::test_new_with_session_and_end_timestamp(
+            recording_session,
+            stream_ids,
+            start_timestamp,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            Duration::ZERO,
+            end_timestamp_receiver,
+        );
+
+        let rows_consumed = Arc::new(AtomicUsize::new(0));
+        let consumer = Box::new(LoweringEndTimestampConsumer {
+            rows_consumed: Arc::clone(&rows_consumed),
+            end_timestamp_sender: Some(end_timestamp_sender),
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            reader.fetch_cdc(ks, TEST_TABLE.to_string(), consumer),
+        )
+        .await
+        .expect("reader did not finish its in-flight paged window within 30 seconds")
+        .unwrap();
+
+        let requests = page_requests.lock().await;
+        assert!(
+            requests.len() >= 3,
+            "page size one should require multiple physical pages for three rows"
+        );
+        assert_eq!(requests[0].window_begin, expected_window_begin);
+        let original_bounds = (requests[0].window_begin, requests[0].window_end);
+        assert!(
+            requests
+                .iter()
+                .all(|request| { (request.window_begin, request.window_end) == original_bounds })
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.paging_state == RecordedPagingState::Initial)
+                .count(),
+            1,
+            "lowering the bound must not start another logical window"
+        );
+        assert_eq!(requests[0].paging_state, RecordedPagingState::Initial);
+        assert!(
+            requests[1..]
+                .iter()
+                .all(|request| { request.paging_state == RecordedPagingState::Continuation })
+        );
+        drop(requests);
+
+        assert_eq!(rows_consumed.load(Relaxed), 3);
     }
 
     #[rstest]
