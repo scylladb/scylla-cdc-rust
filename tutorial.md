@@ -152,6 +152,23 @@ Notice, that the `Session` with the database and the factory must be wrapped ins
 After creating the log reader we can `await` the handle it returns
 so that our application will terminate as soon as the reader finishes.
 
+### Choosing the safety interval
+
+The reader's `safety_interval` defaults to 30 seconds. It queries each CDC stream only
+through `min(window_start + window_size, reader_now - safety_interval)` and advances
+progress after consuming that window. This gives an older CDC entry time to become
+visible before the reader passes its timestamp.
+
+Before shortening this interval, check the effective timeout for writes to the original
+CDC-enabled **base table**, not the CDC log table. Check ScyllaDB's
+`write_request_timeout_in_ms` (2 seconds by default), applicable service levels, and the
+original CQL write queries for `USING TIMEOUT`. Leave additional margin for clock skew
+between the reader and whichever host assigns write timestamps (the application or a
+ScyllaDB node), and for late replica writes. A timeout does not guarantee that every
+write is visible by then. Shorter safety intervals can reduce latency but increase the
+risk of missing late entries. `sleep_interval` controls polling, while `window_size`
+sets the maximum query span; both affect delivery separately.
+
 Now - let's insert some rows into the table.
 After inserting 3 rows and running the application, you should see the output:
 

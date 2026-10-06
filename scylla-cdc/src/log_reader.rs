@@ -421,9 +421,19 @@ impl CDCLogReaderBuilder {
         self
     }
 
-    /// Set safety interval for the [`CDCLogReader`] instance
-    /// to not read data from the CDC log table that has timestamp later than now.
-    /// Default safety interval is 30 seconds.
+    /// Set how far behind the reader's clock a CDC query window must end before
+    /// the reader consumes it and advances its progress. The query ends no later
+    /// than `now - safety_interval`; the default is 30 seconds.
+    ///
+    /// Choose an interval longer than the effective write timeout for the
+    /// original CDC-enabled table, including service-level and CQL `USING TIMEOUT`
+    /// overrides. ScyllaDB's default `write_request_timeout_in_ms` is 2 seconds.
+    /// Allow additional margin for clock skew between the reader and the host
+    /// assigning write timestamps (the application or a ScyllaDB node), and for
+    /// late replica writes. The write timeout alone is not a safety guarantee.
+    /// Shortening the interval can reduce latency but risks missing late entries.
+    /// [`Self::sleep_interval`] controls polling and [`Self::window_size`] limits
+    /// the span of each query separately.
     pub fn safety_interval(mut self, safety_interval: time::Duration) -> Self {
         self.safety_interval = safety_interval;
         self
