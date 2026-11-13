@@ -215,14 +215,9 @@ impl StreamReader {
         let mut window_begin = CqlTimestamp::from_duration_since_epoch(self.config.lower_timestamp);
         let window_size = self.config.window_size;
         let safety_interval = self.config.safety_interval;
-        let mut checkpoint = Checkpoint {
-            timestamp: window_begin.to_duration_since_epoch(),
-            stream_id: self.stream_id_vec[0].clone(),
-            generation: GenerationTimestamp {
-                timestamp: window_begin,
-            },
+        let generation = GenerationTimestamp {
+            timestamp: window_begin,
         };
-        let (sender, receiver) = watch::channel(checkpoint.clone());
 
         if self.config.should_load_progress {
             let mut loaded_timestamp = CqlTimestamp::MAX;
@@ -243,6 +238,16 @@ impl StreamReader {
                 window_begin = window_begin.max(loaded_timestamp);
             }
         }
+
+        // Seeded with the position the reader resumes from, not `lower_timestamp`:
+        // this value is saved right away and again if the reader stops before
+        // completing its first window, so an older one would rewind the streams.
+        let mut checkpoint = Checkpoint {
+            timestamp: window_begin.to_duration_since_epoch(),
+            stream_id: self.stream_id_vec[0].clone(),
+            generation,
+        };
+        let (sender, receiver) = watch::channel(checkpoint.clone());
 
         let mut _handle;
         if self.config.should_save_progress {
@@ -585,6 +590,85 @@ mod tests {
         }
     }
 
+    /// Returns the same checkpoint for every stream and records every save.
+    struct RecordingCheckpointSaver {
+        loaded_checkpoint: Duration,
+        saved: Mutex<Vec<Checkpoint>>,
+        /// Number of saves recorded so far, so that a test can wait for one.
+        save_count: watch::Sender<usize>,
+    }
+
+    impl RecordingCheckpointSaver {
+        fn new(loaded_checkpoint: Duration) -> Self {
+            RecordingCheckpointSaver {
+                loaded_checkpoint,
+                saved: Default::default(),
+                save_count: watch::channel(0).0,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CDCCheckpointSaver for RecordingCheckpointSaver {
+        async fn save_checkpoint(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
+            self.saved.lock().await.push(checkpoint.clone());
+            self.save_count.send_modify(|count| *count += 1);
+            Ok(())
+        }
+
+        async fn save_new_generation(&self, _: &GenerationTimestamp) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn load_last_generation(&self) -> anyhow::Result<Option<GenerationTimestamp>> {
+            Ok(None)
+        }
+
+        async fn load_last_checkpoint(&self, _: &StreamID) -> anyhow::Result<Option<Duration>> {
+            Ok(Some(self.loaded_checkpoint))
+        }
+    }
+
+    /// Holds every query back until the checkpoint saver has saved at least once.
+    /// A reader saves nothing itself before its first query, so that save comes
+    /// from the background saver, and it lands before the reader's final save.
+    struct WaitForSaveSession {
+        session: Arc<Session>,
+        saver: Arc<RecordingCheckpointSaver>,
+    }
+
+    #[async_trait]
+    impl StreamSession for WaitForSaveSession {
+        async fn prepare_statement(
+            &self,
+            query: String,
+        ) -> Result<PreparedStatement, PrepareError> {
+            self.session.prepare(query).await
+        }
+
+        async fn execute_paged_statement(
+            &self,
+            statement: &PreparedStatement,
+            ids: &[StreamID],
+            window_begin: &CqlTimestamp,
+            window_end: &CqlTimestamp,
+            paging_state: PagingState,
+        ) -> Result<(QueryResult, PagingStateResponse), ExecutionError> {
+            let mut save_count = self.saver.save_count.subscribe();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                save_count.wait_for(|count| *count > 0),
+            )
+            .await
+            .expect("the background checkpoint saver did not save within 10s")
+            .expect("the save counter was closed");
+
+            self.session
+                .execute_single_page(statement, (ids, window_begin, window_end), paging_state)
+                .await
+        }
+    }
+
     struct TimeoutSession {
         session: Arc<Session>,
         counter: Arc<AtomicIsize>,
@@ -778,6 +862,76 @@ mod tests {
             assert_eq!(t, 0);
             assert_eq!(v.to_string(), "val0".to_string());
             assert_eq!(s.to_string(), "static0".to_string());
+        }
+    }
+
+    /// Regression test for #190: a reader resuming from a loaded checkpoint
+    /// must never save a checkpoint older than the one it loaded, even when
+    /// it is stopped before completing its first window.
+    #[rstest]
+    #[case::vnodes(false)]
+    #[case::tablets(true)]
+    #[tokio::test]
+    async fn check_loaded_checkpoint_is_not_rewound_to_lower_timestamp(
+        #[case] tablets_enabled: bool,
+    ) {
+        let (shared_session, ks) = skip_if_not_supported!(prepare_simple_db(tablets_enabled));
+
+        populate_simple_db_with_pk(&shared_session, 0)
+            .await
+            .unwrap();
+        let stream_id_vec = get_cdc_stream_id(&shared_session).await.unwrap();
+
+        // Whole milliseconds, the precision checkpoints are stored with.
+        let now_ms = Duration::from_millis(now().as_millis() as u64);
+        let lower_timestamp = now_ms - Duration::from_secs(60);
+        let loaded_checkpoint = now_ms - Duration::from_secs(10);
+
+        let saver = Arc::new(RecordingCheckpointSaver::new(loaded_checkpoint));
+        let checkpoint_saver: Arc<dyn CDCCheckpointSaver> = saver.clone();
+
+        let mut cdc_reader = StreamReader::test_new(
+            &shared_session,
+            stream_id_vec,
+            lower_timestamp,
+            Duration::from_millis(WINDOW_SIZE),
+            Duration::from_millis(SAFETY_INTERVAL),
+            Duration::from_millis(SLEEP_INTERVAL),
+        );
+        cdc_reader.config.should_load_progress = true;
+        cdc_reader.config.should_save_progress = true;
+        cdc_reader.config.checkpoint_saver = Some(checkpoint_saver);
+        cdc_reader.config.pause_between_saves = Duration::from_secs(60);
+        // Make sure the background saver has saved before the reader's final save.
+        cdc_reader.session = Arc::new(WaitForSaveSession {
+            session: Arc::clone(&shared_session),
+            saver: Arc::clone(&saver),
+        });
+
+        // Stop the reader during its first window, before it moves the checkpoint forward.
+        cdc_reader.set_upper_timestamp(CqlTimestamp::MIN).await;
+
+        let consumer = Box::new(FetchTestConsumer {
+            fetched_rows: Default::default(),
+        });
+        cdc_reader
+            .fetch_cdc(ks, TEST_TABLE.to_string(), consumer)
+            .await
+            .unwrap();
+
+        // Both writers ran: the background saver, which saves the initial value as
+        // soon as it starts, and the final save when the reader stops.
+        let saved = saver.saved.lock().await;
+        assert!(
+            saved.len() > 1,
+            "expected a background save and the final save, got {} save(s)",
+            saved.len()
+        );
+        for checkpoint in saved.iter() {
+            assert_eq!(
+                checkpoint.timestamp, loaded_checkpoint,
+                "saved a checkpoint other than the loaded one (lower_timestamp is {lower_timestamp:?})"
+            );
         }
     }
 
