@@ -41,11 +41,18 @@ const DEFAULT_WINDOW_SIZE: i64 = SECOND_IN_MILLIS * 60;
 const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 30;
 const DEFAULT_PAUSE: u64 = 10;
 
+fn lower_timestamp(current: &mut CqlTimestamp, candidate: CqlTimestamp) -> bool {
+    if candidate >= *current {
+        return false;
+    }
+
+    *current = candidate;
+    true
+}
+
 /// To create a new CDCLogReader instance please see documentation for [`CDCLogReaderBuilder`]
 pub struct CDCLogReader {
-    // Tells the worker to stop
-    // Usage of the "watch" channel will make it possible to change the the timestamp later,
-    // for example if somebody loses patience and wants to stop now not later
+    // Carries monotonically lowered end-timestamp stop requests to the worker.
     end_timestamp: tokio::sync::watch::Sender<CqlTimestamp>,
 }
 
@@ -54,16 +61,26 @@ impl CDCLogReader {
         CDCLogReader { end_timestamp }
     }
 
-    // Tell the worker to set the end timestamp and then stop
+    /// Requests that the reader stop at `when` by lowering its end timestamp.
+    ///
+    /// Stop requests are monotonic: a later request cannot move the end timestamp forward.
+    /// This is not immediate cancellation. A logical paged window that has already started
+    /// finishes all of its pages with its original bounds and may deliver rows beyond `when`.
     pub fn stop_at(&mut self, when: Duration) {
-        let _ = self
-            .end_timestamp
-            .send(CqlTimestamp::from_duration_since_epoch(when));
+        let timestamp = CqlTimestamp::from_duration_since_epoch(when);
+        self.end_timestamp
+            .send_if_modified(|current| lower_timestamp(current, timestamp));
     }
 
-    // Tell the worker to stop immediately
+    /// Requests that the reader stop by lowering its end timestamp to the earliest value.
+    ///
+    /// Stop requests are monotonic, so a later [`stop_at`](Self::stop_at) call cannot relax this
+    /// bound. This is not immediate cancellation. A logical paged window that has already started
+    /// finishes all of its pages with its original bounds and may still deliver rows beyond the
+    /// newly lowered bound before the reader stops.
     pub fn stop(&mut self) {
-        let _ = self.end_timestamp.send(CqlTimestamp::MIN);
+        self.end_timestamp
+            .send_if_modified(|current| lower_timestamp(current, CqlTimestamp::MIN));
     }
 
     /// Checks if the given keyspace uses tablets by querying system_schema.scylla_keyspaces.
@@ -94,7 +111,6 @@ struct CDCReaderWorker {
     session: Arc<Session>,
     keyspace: String,
     table_name: String,
-    end_timestamp: CqlTimestamp,
     readers: Vec<Arc<StreamReader>>,
     end_timestamp_receiver: tokio::sync::watch::Receiver<CqlTimestamp>,
     consumer_factory: Arc<dyn ConsumerFactory>,
@@ -160,9 +176,8 @@ impl CDCReaderWorker {
                     self.set_upper_timestamp(generation.timestamp).await;
                 }
                 Ok(_) = self.end_timestamp_receiver.changed() => {
-                    let timestamp = *self.end_timestamp_receiver.borrow_and_update();
-                    self.end_timestamp = timestamp;
-                    self.set_upper_timestamp(timestamp).await;
+                    // Wake the worker. Readers observe this channel directly, and generation
+                    // decisions below read its current value when needed.
                 }
             }
 
@@ -186,7 +201,7 @@ impl CDCReaderWorker {
 
             if let Some(generation) = next_generation.take() {
                 current_generation = Some(generation.clone());
-                if generation.timestamp > self.end_timestamp {
+                if generation.timestamp > self.end_timestamp() {
                     return Ok(());
                 }
 
@@ -212,11 +227,10 @@ impl CDCReaderWorker {
                             &self.session,
                             stream_ids,
                             reader_config.clone(),
+                            self.end_timestamp_receiver.clone(),
                         ))
                     })
                     .collect();
-
-                self.set_upper_timestamp(self.end_timestamp).await;
 
                 // Spawn a task for each stream reader to fetch CDC rows
                 stream_reader_tasks = JoinSet::new();
@@ -232,7 +246,7 @@ impl CDCReaderWorker {
                 }
             } else if let Some(current) = current_generation.take() {
                 if let Ok(Some(generation)) = fetcher.fetch_next_generation(&current).await {
-                    if generation.timestamp <= self.end_timestamp {
+                    if generation.timestamp <= self.end_timestamp() {
                         // Fetched next generation with lower or equal timestamp than end_timestamp
                         next_generation = Some(generation.clone());
                         self.set_upper_timestamp(generation.timestamp).await;
@@ -255,15 +269,21 @@ impl CDCReaderWorker {
         }
     }
 
-    /// Updates all of the readers with the new upper timestamp.
-    /// When the timestamp is reached, the readers will stop after finishing the current request.
+    /// Updates all readers with a generation or internal-error cap.
+    /// When the timestamp is reached, the readers stop after finishing any in-flight logical
+    /// paged window, including all of its continuation pages.
     async fn set_upper_timestamp(&self, ts: CqlTimestamp) {
         for reader in self.readers.iter() {
             reader.set_upper_timestamp(ts).await;
         }
     }
 
-    /// Updates all of the readers with the timestamp in the past, causing them to stop as soon as the current request finishes.
+    fn end_timestamp(&self) -> CqlTimestamp {
+        *self.end_timestamp_receiver.borrow()
+    }
+
+    /// Updates all readers with the earliest timestamp, causing them to stop after any in-flight
+    /// logical paged window finishes.
     async fn stop_now(&self) {
         self.set_upper_timestamp(CqlTimestamp::MIN).await;
     }
@@ -540,7 +560,6 @@ impl CDCLogReaderBuilder {
             session,
             keyspace,
             table_name,
-            end_timestamp: CqlTimestamp::from_duration_since_epoch(self.end_timestamp),
             readers,
             end_timestamp_receiver,
             consumer_factory,
@@ -573,9 +592,11 @@ mod tests {
     use crate::consumer::CDCRow;
     use crate::consumer::Consumer;
     use crate::consumer::ConsumerFactory;
+    use crate::log_reader::CDCLogReader;
     use crate::log_reader::CDCLogReaderBuilder;
     use anyhow::anyhow;
     use async_trait::async_trait;
+    use scylla::value::CqlTimestamp;
     use scylla_cdc_test_utils::TEST_TABLE;
     use scylla_cdc_test_utils::now;
     use scylla_cdc_test_utils::populate_simple_db_with_pk;
@@ -592,6 +613,20 @@ mod tests {
 
     const ERR_MESSAGE: &str = "oops";
     const SAFETY_INTERVAL: u64 = 3000;
+
+    #[test]
+    fn stop_requests_keep_earliest_timestamp() {
+        let (sender, receiver) = tokio::sync::watch::channel(CqlTimestamp(300));
+        let mut reader = CDCLogReader::new(sender);
+
+        reader.stop_at(Duration::from_millis(100));
+        reader.stop_at(Duration::from_millis(200));
+        assert_eq!(*receiver.borrow(), CqlTimestamp(100));
+
+        reader.stop();
+        reader.stop_at(Duration::from_millis(50));
+        assert_eq!(*receiver.borrow(), CqlTimestamp::MIN);
+    }
 
     #[async_trait]
     impl Consumer for ErrorConsumer {
