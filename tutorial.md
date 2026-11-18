@@ -337,3 +337,8 @@ let (log_reader, handle) = CDCLogReaderBuilder::new()
 ```
 
 __Note__: Setting saving/loading progress requires also setting checkpoint_saver to be used.
+
+When loading progress, omit `start_timestamp` to resume from the saved generation. If an explicit
+start timestamp is provided, it acts as a lower bound and the reader starts from the later of that
+timestamp and the saved progress. If no saved generation exists, the default current timestamp is
+used.

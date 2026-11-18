@@ -41,6 +41,18 @@ const DEFAULT_WINDOW_SIZE: i64 = SECOND_IN_MILLIS * 60;
 const DEFAULT_SAFETY_INTERVAL: i64 = SECOND_IN_MILLIS * 30;
 const DEFAULT_PAUSE: u64 = 10;
 
+fn resolve_start_timestamp(
+    configured_start: Duration,
+    start_is_explicit: bool,
+    saved_generation: Option<Duration>,
+) -> Duration {
+    match (start_is_explicit, saved_generation) {
+        (_, None) => configured_start,
+        (false, Some(saved_generation)) => saved_generation,
+        (true, Some(saved_generation)) => max(configured_start, saved_generation),
+    }
+}
+
 /// To create a new CDCLogReader instance please see documentation for [`CDCLogReaderBuilder`]
 pub struct CDCLogReader {
     // Tells the worker to stop
@@ -316,6 +328,7 @@ pub struct CDCLogReaderBuilder {
     keyspace: Option<String>,
     table_name: Option<String>,
     start_timestamp: Duration,
+    start_timestamp_is_explicit: bool,
     end_timestamp: Duration,
     window_size: time::Duration,
     safety_interval: time::Duration,
@@ -331,7 +344,7 @@ impl CDCLogReaderBuilder {
     /// Creates new CDCLogReaderBuilder with default configuration.
     ///
     /// # Default configuration
-    /// * start_timestamp: current timestamp
+    /// * start_timestamp: current timestamp, unless saved progress is loaded
     /// * window_size: 60 seconds
     /// * safety_interval: 30 seconds
     /// * sleep_interval: 10 seconds
@@ -347,6 +360,7 @@ impl CDCLogReaderBuilder {
         let start_timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("system time is before Unix epoch");
+        let start_timestamp_is_explicit = false;
         let window_size = time::Duration::from_millis(DEFAULT_WINDOW_SIZE as u64);
         let safety_interval = time::Duration::from_millis(DEFAULT_SAFETY_INTERVAL as u64);
         let sleep_interval = time::Duration::from_millis(DEFAULT_SLEEP_INTERVAL as u64);
@@ -360,6 +374,7 @@ impl CDCLogReaderBuilder {
             keyspace,
             table_name,
             start_timestamp,
+            start_timestamp_is_explicit,
             end_timestamp,
             window_size,
             safety_interval,
@@ -401,8 +416,12 @@ impl CDCLogReaderBuilder {
 
     /// Set start timestamp from which [`CDCLogReader`] instance will start reading
     /// from the user specified CDC log table.
+    ///
+    /// When loading saved progress, an explicitly set timestamp acts as a lower bound:
+    /// the reader starts from the later of this timestamp and the saved generation.
     pub fn start_timestamp(mut self, start_timestamp: Duration) -> Self {
         self.start_timestamp = start_timestamp;
+        self.start_timestamp_is_explicit = true;
         self
     }
 
@@ -447,6 +466,9 @@ impl CDCLogReaderBuilder {
 
     /// Set flag indicating whether the [`CDCLogReader`] instance should resume
     /// progress from set previously checkpoints.
+    ///
+    /// If no start timestamp was explicitly set, a saved generation replaces the
+    /// default start timestamp. If no saved generation exists, the default is used.
     /// Default value is `false`.
     pub fn should_load_progress(mut self, value: bool) -> Self {
         self.should_load_progress = value;
@@ -506,22 +528,23 @@ impl CDCLogReaderBuilder {
             tokio::sync::watch::channel(end_timestamp);
         let readers = vec![];
 
-        let mut start_timestamp = self.start_timestamp;
-        if self.should_load_progress
-            && let Some(generation) = self
-                .checkpoint_saver
+        let saved_generation = if self.should_load_progress {
+            self.checkpoint_saver
                 .as_ref()
                 .ok_or_else(|| {
                     anyhow::anyhow!("checkpoint_saver is not set, while should_load is true")
                 })?
                 .load_last_generation()
                 .await?
-        {
-            start_timestamp = std::cmp::max(
-                generation.timestamp.to_duration_since_epoch(),
-                start_timestamp,
-            );
-        }
+                .map(|generation| generation.timestamp.to_duration_since_epoch())
+        } else {
+            None
+        };
+        let start_timestamp = resolve_start_timestamp(
+            self.start_timestamp,
+            self.start_timestamp_is_explicit,
+            saved_generation,
+        );
 
         let uses_tablets = CDCLogReader::uses_tablets(&session, &keyspace).await?;
 
@@ -574,6 +597,7 @@ mod tests {
     use crate::consumer::Consumer;
     use crate::consumer::ConsumerFactory;
     use crate::log_reader::CDCLogReaderBuilder;
+    use crate::log_reader::resolve_start_timestamp;
     use anyhow::anyhow;
     use async_trait::async_trait;
     use scylla_cdc_test_utils::TEST_TABLE;
@@ -592,6 +616,21 @@ mod tests {
 
     const ERR_MESSAGE: &str = "oops";
     const SAFETY_INTERVAL: u64 = 3000;
+
+    #[test]
+    fn test_resolve_start_timestamp() {
+        let earlier = Duration::from_secs(10);
+        let later = Duration::from_secs(20);
+
+        assert_eq!(
+            resolve_start_timestamp(later, false, Some(earlier)),
+            earlier
+        );
+        assert_eq!(resolve_start_timestamp(earlier, true, Some(later)), later);
+        assert_eq!(resolve_start_timestamp(later, true, Some(earlier)), later);
+        assert_eq!(resolve_start_timestamp(earlier, false, None), earlier);
+        assert_eq!(resolve_start_timestamp(later, true, None), later);
+    }
 
     #[async_trait]
     impl Consumer for ErrorConsumer {

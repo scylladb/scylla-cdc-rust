@@ -440,7 +440,7 @@ mod tests {
     async fn create_reader_with_saving(
         test: &Test,
         factory: &Arc<TestConsumerFactory>,
-        start: Duration,
+        start: Option<Duration>,
         end: Duration,
     ) -> RemoteHandle<Result<()>> {
         let default_cp_saver = Arc::new(
@@ -453,11 +453,10 @@ mod tests {
             .await
             .unwrap(),
         );
-        let (_tester, handle) = CDCLogReaderBuilder::new()
+        let mut builder = CDCLogReaderBuilder::new()
             .session(Arc::clone(&test.session))
             .keyspace(test.keyspace.as_str())
             .table_name(test.table_name.as_str())
-            .start_timestamp(start)
             .end_timestamp(end)
             .window_size(time::Duration::from_millis(WINDOW_SIZE))
             .safety_interval(time::Duration::from_millis(SAFETY_INTERVAL))
@@ -466,7 +465,11 @@ mod tests {
             .should_save_progress(true)
             .should_load_progress(true)
             .pause_between_saves(time::Duration::from_millis(SLEEP_INTERVAL))
-            .checkpoint_saver(default_cp_saver)
+            .checkpoint_saver(default_cp_saver);
+        if let Some(start) = start {
+            builder = builder.start_timestamp(start);
+        }
+        let (_tester, handle) = builder
             .build()
             .await
             .expect("Creating cdc log printer failed!");
@@ -506,7 +509,9 @@ mod tests {
             let end_with_margin = end
                 .checked_add(Duration::from_secs(1))
                 .unwrap_or(Duration::MAX);
-            let handle = create_reader_with_saving(&test, &factory, start, end_with_margin).await;
+            let explicit_start = (i == 0).then_some(start);
+            let handle =
+                create_reader_with_saving(&test, &factory, explicit_start, end_with_margin).await;
 
             handle.await.unwrap();
         }
