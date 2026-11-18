@@ -82,6 +82,7 @@ pub struct TableBackedCheckpointSaver {
     session: Arc<Session>,
     checkpoint_table: String,
     make_checkpoint_stmt: PreparedStatement,
+    make_generation_stmt: PreparedStatement,
 }
 
 /// Default Time To Live of a checkpoint: 7 days.
@@ -259,10 +260,26 @@ impl TableBackedCheckpointSaverBuilder {
                 )
             })?;
 
+        let make_generation_stmt = session
+            .prepare(format!(
+                "UPDATE {checkpoint_table} USING TTL 0
+                SET generation = ?, time = ?
+                WHERE stream_id = ?"
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to prepare the generation statement, \
+                    make sure that the table {checkpoint_table} exists with the expected schema:\n{}",
+                    get_checkpoint_table_schema(&checkpoint_table)
+                )
+            })?;
+
         Ok(TableBackedCheckpointSaver {
             session,
             checkpoint_table,
             make_checkpoint_stmt,
+            make_generation_stmt,
         })
     }
 }
@@ -318,7 +335,7 @@ impl CDCCheckpointSaver for TableBackedCheckpointSaver {
 
         self.session
             .execute_unpaged(
-                &self.make_checkpoint_stmt,
+                &self.make_generation_stmt,
                 (generation, dummy_timestamp, marked_stream_id),
             )
             .await?;
@@ -382,13 +399,45 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn setup() -> (Arc<Session>, String, Arc<TableBackedCheckpointSaver>) {
-        const DEFAULT_TTL: i64 = 300;
+    async fn setup_with_ttl(ttl: i64) -> (Arc<Session>, String, Arc<TableBackedCheckpointSaver>) {
         let (session, ks) = prepare_db(&[], 1, false).await.unwrap();
         let table_name = unique_name();
 
         let cp_saver = Arc::new(
-            TableBackedCheckpointSaver::new(session.clone(), &ks, &table_name, DEFAULT_TTL)
+            TableBackedCheckpointSaver::new(session.clone(), &ks, &table_name, ttl)
+                .await
+                .unwrap(),
+        );
+
+        (session, table_name, cp_saver)
+    }
+
+    async fn setup() -> (Arc<Session>, String, Arc<TableBackedCheckpointSaver>) {
+        setup_with_ttl(300).await
+    }
+
+    async fn setup_with_table_ttl(
+        checkpoint_ttl: i64,
+        table_ttl: i64,
+    ) -> (Arc<Session>, String, Arc<TableBackedCheckpointSaver>) {
+        let (session, ks) = prepare_db(&[], 1, false).await.unwrap();
+        let table_name = unique_name();
+        let schema = format!(
+            "{} WITH default_time_to_live = {table_ttl}",
+            TableBackedCheckpointSaver::table_schema_cql(&ks, &table_name)
+        );
+
+        session.query_unpaged(schema, ()).await.unwrap();
+        session.await_schema_agreement().await.unwrap();
+
+        let cp_saver = Arc::new(
+            TableBackedCheckpointSaver::builder()
+                .session(session.clone())
+                .keyspace(&ks)
+                .table_name(&table_name)
+                .ttl(checkpoint_ttl)
+                .create_table(false)
+                .build()
                 .await
                 .unwrap(),
         );
@@ -480,6 +529,38 @@ mod tests {
         assert_eq!(
             cp_saver.load_last_generation().await.unwrap().unwrap(),
             generation
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generation_does_not_expire_with_checkpoints() {
+        let (_, _, cp_saver) = setup_with_table_ttl(1, 1).await;
+        let generation = GenerationTimestamp {
+            timestamp: CqlTimestamp(42),
+        };
+        let mut checkpoint = Checkpoint {
+            timestamp: Duration::from_secs(128),
+            stream_id: StreamID { id: vec![1] },
+            generation: generation.clone(),
+        };
+
+        cp_saver.save_new_generation(&generation).await.unwrap();
+        cp_saver.save_checkpoint(&checkpoint).await.unwrap();
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        checkpoint.timestamp += Duration::from_secs(1);
+        cp_saver.save_checkpoint(&checkpoint).await.unwrap();
+
+        assert_eq!(
+            cp_saver.load_last_generation().await.unwrap(),
+            Some(generation)
+        );
+        assert_eq!(
+            cp_saver
+                .load_last_checkpoint(&checkpoint.stream_id)
+                .await
+                .unwrap(),
+            Some(checkpoint.timestamp)
         );
     }
 
